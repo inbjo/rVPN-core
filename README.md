@@ -80,6 +80,24 @@ cargo zigbuild --release --target armv7-unknown-linux-gnueabihf
 cargo zigbuild --release --target x86_64-unknown-linux-musl
 ```
 
+### Windows CLI client
+
+On Windows with the MSVC Rust toolchain installed, build the command-line client:
+
+```powershell
+cd rvpn
+cargo build --release --locked --package rvpn-client --bin rvpn
+.\target\release\rvpn.exe --help
+```
+
+The [Windows CLI client workflow](.github/workflows/windows-client.yml) runs on
+pushes and pull requests that change Rust sources or the workflow. It can also
+be started manually from GitHub Actions. Each successful run provides a
+`rvpn-windows-x86_64-cli` artifact containing `rvpn.exe` and its SHA-256 checksum.
+Use SOCKS5 mode with the same client configuration as other desktop builds.
+Windows TUN mode requires a compatible TUN driver and elevated privileges;
+the workflow checks CLI startup, not a live VPN connection.
+
 ### Mobile library
 
 The `rvpn-mobile` crate produces a static library (`librvpn_mobile.a`) for linking into native iOS, macOS, and Android apps. Build it with the appropriate feature flag:
