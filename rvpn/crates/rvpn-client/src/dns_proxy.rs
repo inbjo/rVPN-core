@@ -56,8 +56,8 @@ pub struct DnsProxy {
     next_id: AtomicU64,
     /// DNS resolver with caching for both local and tunnel responses
     dns_resolver: Arc<DnsResolver>,
-    /// Public nameservers for bypass domain resolution (direct UDP, avoids loopback)
-    nameservers: Vec<SocketAddr>,
+    /// Explicit UDP/DoH upstreams for local queries (avoids loopback)
+    nameservers: rvpn_split_tunnel::dns_cache::DnsUpstreams,
     /// Hostnames of all configured VPN servers (primary + extras), lowercased
     /// with any trailing dot stripped. Queries for these are always resolved
     /// locally — see the dispatch loop for why.
@@ -81,7 +81,7 @@ impl DnsProxy {
         server_bundle: Arc<X3DHPublicBundle>,
         split_tunnel: Arc<SplitTunnel>,
         dns_resolver: Arc<DnsResolver>,
-        nameservers: Vec<SocketAddr>,
+        nameservers: rvpn_split_tunnel::dns_cache::DnsUpstreams,
         extra_server_hosts: Vec<String>,
     ) -> Self {
         // Derive DNS path from base WebSocket path, stripping any mux/tun suffix
@@ -111,10 +111,7 @@ impl DnsProxy {
             split_tunnel,
             next_id: AtomicU64::new(1),
             dns_resolver,
-            // Append last-resort public resolvers so a transient failure of
-            // the configured resolvers degrades to a slower answer instead of
-            // SERVFAIL for every bypass query.
-            nameservers: rvpn_split_tunnel::dns_cache::with_last_resort_nameservers(&nameservers),
+            nameservers,
             server_hosts: Arc::new(server_hosts),
             resumption: ResumptionStore::new(),
         }
@@ -181,7 +178,7 @@ impl DnsProxy {
                                 // Resolve locally — bypass domain should not go through tunnel
                                 debug!("DNS proxy: resolving {} locally (bypass)", domain);
                                 let wire = match resolve_locally(
-                                    &data, dns_txid, &domain, qtype, &nameservers_clone
+                                    &data, &nameservers_clone
                                 ).await {
                                     Ok(wire) => {
                                         // Parse and cache successful bypass responses
@@ -225,7 +222,7 @@ impl DnsProxy {
                                 if qtype != 1 && qtype != 28 {
                                     debug!("DNS proxy: resolving {} (type={}) locally (non-A/AAAA)", domain, qtype);
                                     let wire = match resolve_locally(
-                                        &data, dns_txid, &domain, qtype, &nameservers_clone
+                                        &data, &nameservers_clone
                                     ).await {
                                         Ok(wire) => wire,
                                         Err(e) => {
@@ -778,101 +775,12 @@ fn find_question_end(query: &[u8], mut pos: usize) -> usize {
     query.len()
 }
 
-/// Resolve a domain locally (for split-tunnel bypass domains) via direct UDP to public nameservers.
-///
-/// When the DNS proxy is the system DNS resolver, calling `resolver.resolve()` would loop back
-/// to ourselves. Instead, we send the raw DNS query directly to public nameservers via UDP
-/// and return the raw response bytes. This breaks the circular dependency that locks the
-/// entire connection when the tunnel WebSocket is dead.
+/// Forward local/bypass queries using the explicit UDP/DoH upstream list.
 async fn resolve_locally(
     query: &[u8],
-    txid: u16,
-    domain: &str,
-    _qtype: u16,
-    nameservers: &[SocketAddr],
+    nameservers: &rvpn_split_tunnel::dns_cache::DnsUpstreams,
 ) -> Result<Vec<u8>> {
-    if nameservers.is_empty() {
-        return Err(anyhow::anyhow!("No public nameservers configured for bypass domain resolution"));
-    }
-    match resolve_via_udp_forward(query, txid, nameservers).await {
-        Ok(response) => Ok(response),
-        Err(e) => {
-            warn!("DNS proxy: UDP forward failed for bypass domain {}: {}", domain, e);
-            Err(e)
-        }
-    }
-}
-
-/// Forward a raw DNS query to public nameservers via UDP.
-/// Returns the raw DNS response bytes with the transaction ID set to `txid`.
-async fn resolve_via_udp_forward(
-    query: &[u8],
-    txid: u16,
-    nameservers: &[SocketAddr],
-) -> Result<Vec<u8>> {
-    for ns in nameservers {
-        match query_nameserver_udp_raw(*ns, query).await {
-            Ok(mut response_bytes) => {
-                // Ensure transaction ID matches the client's query
-                if response_bytes.len() >= 2 {
-                    response_bytes[0] = (txid >> 8) as u8;
-                    response_bytes[1] = (txid & 0xFF) as u8;
-                }
-                return Ok(response_bytes);
-            }
-            Err(e) => {
-                debug!("Nameserver {} failed: {}", ns, e);
-            }
-        }
-    }
-    Err(anyhow::anyhow!("All public nameservers failed for UDP forward"))
-}
-
-/// Send a raw DNS query to a nameserver and return the raw response bytes.
-/// Retries up to 2 times on timeout to handle brief packet loss on congested networks.
-async fn query_nameserver_udp_raw(
-    nameserver: SocketAddr,
-    query: &[u8],
-) -> Result<Vec<u8>> {
-    const MAX_RETRIES: usize = 2;
-    const TIMEOUT_SECS: u64 = 3;
-
-    let mut last_error = None;
-
-    for attempt in 0..=MAX_RETRIES {
-        if attempt > 0 {
-            // Brief backoff before retry: 200ms, then 500ms
-            tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
-        }
-
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .context("Failed to bind UDP socket for DNS forward")?;
-
-        if let Err(e) = socket.send_to(query, nameserver).await {
-            last_error = Some(format!("send failed: {}", e));
-            continue;
-        }
-
-        let mut buf = [0u8; 4096];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(TIMEOUT_SECS),
-            socket.recv_from(&mut buf),
-        )
-        .await
-        {
-            Ok(Ok((len, _))) => return Ok(buf[..len].to_vec()),
-            Ok(Err(e)) => last_error = Some(format!("recv error: {}", e)),
-            Err(_) => last_error = Some(format!("timeout ({}s)", TIMEOUT_SECS)),
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "Nameserver {} failed after {} attempts — last: {}",
-        nameserver,
-        MAX_RETRIES + 1,
-        last_error.unwrap_or_else(|| "unknown".to_string())
-    ))
+    nameservers.query(query).await
 }
 
 /// Build a minimal DNS NXDOMAIN response (for blocked ad/tracker domains)

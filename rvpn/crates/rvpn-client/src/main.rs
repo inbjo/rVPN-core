@@ -21,6 +21,7 @@ mod metrics;
 mod proxy_common;
 mod router;
 mod server_pool;
+mod service;
 mod socks5;
 mod socks5_tunnel;
 mod split_tunnel;
@@ -113,6 +114,11 @@ struct Args {
 /// Subcommands
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Install or manage the system service (requires administrator/root)
+    Service {
+        #[command(subcommand)]
+        action: service::ServiceAction,
+    },
     /// Generate new identity key
     Keygen {
         /// Key type (ed25519)
@@ -139,10 +145,23 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Commands::Service { action }) = &args.command {
+        anyhow::ensure!(
+            args.server.is_none()
+                && args.bundle.is_none()
+                && args.fingerprint.is_none()
+                && args.dashboard_listen.is_none()
+                && args.verbose == 0,
+            "Service settings must be saved in the config file; CLI overrides are not persisted"
+        );
+        return service::execute(action, &args.config);
+    }
+    tokio::runtime::Runtime::new()?.block_on(async_main(args))
+}
 
+async fn async_main(args: Args) -> Result<()> {
     // Setup logging
     let log_level = match args.verbose {
         0 => Level::INFO,
@@ -202,6 +221,8 @@ async fn main() -> Result<()> {
         }
         _ => {}
     }
+
+    websocket::configure_endpoint_dns(&config)?;
 
     // Run in appropriate mode based on config
     if config.tun.enabled {
@@ -335,32 +356,9 @@ async fn run_socks5(config: ClientConfig) -> Result<()> {
                 )
             })?;
 
-        // Parse nameservers — accept both "ip:port" and bare "ip" (defaults to :53)
-        let mut nameservers: Vec<std::net::SocketAddr> = Vec::new();
-        for ns_str in &config.dns_proxy.nameservers {
-            let parsed: Result<std::net::SocketAddr, _> = ns_str.parse();
-            match parsed {
-                Ok(addr) => nameservers.push(addr),
-                Err(_) => {
-                    // Try parsing as bare IP and append :53
-                    let with_port = format!("{}:53", ns_str);
-                    match with_port.parse() {
-                        Ok(addr) => nameservers.push(addr),
-                        Err(e) => {
-                            warn!("Failed to parse DNS nameserver '{}': {}. Expected format: ip:port or bare ip", ns_str, e);
-                        }
-                    }
-                }
-            }
-        }
-        if nameservers.is_empty() && !config.dns_proxy.nameservers.is_empty() {
-            warn!("All configured DNS nameservers failed to parse. Using defaults.");
-            nameservers = vec![
-                "223.5.5.5:53".parse().unwrap(),
-                "1.1.1.1:53".parse().unwrap(),
-                "8.8.8.8:53".parse().unwrap(),
-            ];
-        }
+        let nameservers = rvpn_split_tunnel::dns_cache::DnsUpstreams::new(
+            &config.dns_proxy.nameservers,
+        )?;
 
         // All VPN server hostnames (primary + multi-server routing targets).
         // The DNS proxy resolves these locally so a tunnel reconnect never
@@ -422,8 +420,12 @@ async fn run_socks5(config: ClientConfig) -> Result<()> {
         });
     }
 
-    // Run SOCKS5 proxy (never returns unless error)
-    proxy.run().await?;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(handle_signals(shutdown_tx));
+    tokio::select! {
+        result = proxy.run() => result?,
+        _ = shutdown_rx.changed() => {},
+    }
 
     Ok(())
 }
@@ -659,10 +661,12 @@ async fn handle_signals(shutdown_tx: tokio::sync::watch::Sender<bool>) {
 
     #[cfg(windows)]
     {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        info!("Received Ctrl+C, initiating graceful shutdown...");
+        if service::windows::is_service() {
+            service::windows::wait_stop().await;
+        } else {
+            tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        }
+        info!("Received shutdown request, initiating graceful shutdown...");
     }
 
     let _ = shutdown_tx.send(true);

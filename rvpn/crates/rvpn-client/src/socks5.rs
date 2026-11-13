@@ -122,29 +122,14 @@ impl Socks5Proxy {
         } else {
             &config.network.dns_servers
         };
-        let nameservers: Vec<SocketAddr> = nameserver_list
-            .iter()
-            .filter_map(|s| {
-                let addr = if s.contains(':') {
-                    s.parse::<SocketAddr>().ok()
-                } else {
-                    format!("{}:53", s).parse::<SocketAddr>().ok()
-                };
-                if addr.is_none() {
-                    warn!("Invalid DNS server address: {}, skipping", s);
-                }
-                addr
-            })
-            .collect();
-
         let dns_resolver = Arc::new(DnsResolver::new(
             config.network.dns_cache_enabled,
             config.network.dns_cache_ttl,
             config.network.dns_cache_size,
             config.network.ipv6_enabled,
             config.network.prefer_ipv4,
-            nameservers,
-        ));
+            vec![],
+        ).with_nameservers(nameserver_list)?);
         dns_resolver.start_cleanup_task();
 
         let split_tunnel = match SplitTunnel::new(config.split_tunnel.clone(), Arc::clone(&dns_resolver)).await {

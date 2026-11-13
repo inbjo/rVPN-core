@@ -1,6 +1,8 @@
 name: CLI client and server
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
   schedule:
     # 02:00 UTC = 10:00 Asia/Taipei.
@@ -177,11 +179,17 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  nightly:
-    name: Publish nightly release
+  publish:
+    name: Publish release assets
     needs: [rule_data, windows, unix]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: >-
+      (github.event_name == 'release' && github.event.release.tag_name != 'nightly') ||
+      (github.ref == 'refs/heads/main' &&
+       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
     runs-on: ubuntu-24.04
+    concurrency:
+      group: release-assets-${{ github.event_name == 'release' && github.event.release.tag_name || 'nightly' }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -239,7 +247,8 @@ jobs:
           fi
           (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS.txt)
 
-      - name: Publish prerelease
+      - name: Update nightly prerelease and replace assets
+        if: github.event_name != 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -247,8 +256,56 @@ jobs:
         run: |
           set -euo pipefail
           date_utc="$(date -u +%Y%m%d)"
-          tag="nightly-${date_utc}-${GITHUB_RUN_ID}"
-          gh release create "$tag" dist/* \
-            --title "Nightly ${date_utc} (${GITHUB_SHA:0:7})" \
-            --notes "Automated CLI client and server builds for Windows, Linux, and macOS. Client archives include freshly converted rules, source hashes, and upstream license notices; server archives contain only the server binary. See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup." \
-            --prerelease --target "$GITHUB_SHA"
+          tag=nightly
+          title="Nightly ${date_utc} (${GITHUB_SHA:0:7})"
+          cat > nightly-notes.md <<EOF
+          Automated CLI client and server builds for Windows, Linux, and macOS.
+          Commit: ${GITHUB_SHA}
+          Client archives include refreshed routing rules, source hashes, and upstream license notices.
+          See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup.
+          This prerelease and its assets are replaced by each nightly build.
+          EOF
+
+          # Keep the tag aligned with the binaries; never create per-run tags.
+          if gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --silent; then
+            gh api --method PATCH "repos/${GH_REPO}/git/refs/tags/${tag}" \
+              -f sha="$GITHUB_SHA" -F force=true --silent
+          else
+            gh api --method POST "repos/${GH_REPO}/git/refs" \
+              -f ref="refs/tags/${tag}" -f sha="$GITHUB_SHA" --silent
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --title "$title" --notes-file nightly-notes.md \
+              --prerelease --latest=false
+          else
+            gh release create "$tag" dist/* --verify-tag \
+              --title "$title" --notes-file nightly-notes.md --prerelease --latest=false
+          fi
+
+      - name: Remove superseded per-run nightly releases and tags
+        if: github.event_name != 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+            --jq '.[] | select(.prerelease == true) | .tag_name' > old-nightlies.txt
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^nightly-[0-9]{8}-[0-9]+$ ]]; then
+              gh release delete "$tag" --yes --cleanup-tag
+            fi
+          done < old-nightlies.txt
+
+      - name: Replace assets on the published release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/* --clobber

@@ -400,7 +400,7 @@ async fn handle_http_forward(
         }
         RoutingDecision::Bypass => {
             info!("Bypassing VPN for HTTP {}:{}", target_host, target_port);
-            let mut target = TcpStream::connect(&target_addr)
+            let mut target = crate::websocket::connect_direct_tcp(&target_host, target_port)
                 .await
                 .with_context(|| format!("Failed to connect to {}", target_addr))?;
 

@@ -35,6 +35,45 @@ pub type WebSocketReader = tokio::sync::mpsc::Receiver<Message>;
 /// backpressure reach TCP instead of the heap.
 const WS_CHANNEL_CAPACITY: usize = 256;
 
+/// Optional DoH resolver for VPN endpoint DNS, shared across reconnects.
+#[cfg(not(target_os = "android"))]
+static ENDPOINT_DNS: std::sync::OnceLock<crate::dns_cache::DnsResolver> = std::sync::OnceLock::new();
+
+#[cfg(not(target_os = "android"))]
+pub fn configure_endpoint_dns(client_config: &crate::config::ClientConfig) -> Result<()> {
+    let config = &client_config.network;
+    let nameservers = if config.dns_servers.is_empty() {
+        &client_config.dns_proxy.nameservers
+    } else {
+        &config.dns_servers
+    };
+    if nameservers.iter().any(|ns| ns.contains("://")) {
+        let resolver = crate::dns_cache::DnsResolver::new(
+            config.dns_cache_enabled,
+            config.dns_cache_ttl,
+            config.dns_cache_size,
+            config.ipv6_enabled,
+            config.prefer_ipv4,
+            vec![],
+        ).with_nameservers(nameservers)?;
+        ENDPOINT_DNS.set(resolver)
+            .map_err(|_| anyhow::anyhow!("Endpoint DNS already configured"))?;
+    }
+    Ok(())
+}
+
+/// Direct connections use the configured DoH resolver too, avoiding a second
+/// hostname lookup by the OS after a split-tunnel decision.
+#[cfg(not(target_os = "android"))]
+pub async fn connect_direct_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream> {
+    if let Some(resolver) = ENDPOINT_DNS.get() {
+        let addresses = resolver.resolve(host, port).await?;
+        Ok(tokio::net::TcpStream::connect(addresses.as_slice()).await?)
+    } else {
+        Ok(tokio::net::TcpStream::connect((host, port)).await?)
+    }
+}
+
 /// WebSocket writer type (sends messages)
 #[derive(Clone)]
 pub struct WebSocketWriter {
@@ -130,10 +169,27 @@ pub async fn connect_websocket(
     resumption: Option<&ResumptionStore>,
 ) -> Result<WebSocketStream<ChromeTlsStream>> {
     // Establish TLS connection with Chrome fingerprint via boring
-    let tls_stream =
+    let tls_stream = if let Some(resolver) = ENDPOINT_DNS.get() {
+        let addresses = resolver.resolve(host, port).await?;
+        let mut connected = None;
+        let mut last_error = None;
+        for addr in addresses {
+            let connect_host = match addr.ip() {
+                std::net::IpAddr::V4(ip) => ip.to_string(),
+                std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+            };
+            match connect_chrome_like_with_resumption(
+                &connect_host, port, fingerprint, Some(sni_hostname.unwrap_or(host)), resumption,
+            ).await {
+                Ok(stream) => { connected = Some(stream); break; }
+                Err(e) => last_error = Some(e),
+            }
+        }
+        connected.ok_or_else(|| last_error.unwrap_or_else(|| anyhow::anyhow!("No VPN endpoint addresses")))?
+    } else {
         connect_chrome_like_with_resumption(host, port, fingerprint, sni_hostname, resumption)
-            .await
-            .context("Failed to establish Chrome-fingerprinted TLS connection")?;
+            .await.context("Failed to establish Chrome-fingerprinted TLS connection")?
+    };
 
     // Build Chrome-like WebSocket upgrade request with 15 headers.
     // Real Chrome 131 sends these on WebSocket upgrade — matching this profile makes

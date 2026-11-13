@@ -683,7 +683,8 @@ pub struct DnsProxyConfig {
     #[serde(default = "default_dns_proxy_listen")]
     pub listen_address: String,
 
-    /// Public nameservers for bypass domain resolution (direct UDP).
+    /// DNS upstreams: IP[:port] for UDP or https://IP/dns-query for DoH.
+    /// Entries are tried in order; DoH-only lists have no plaintext fallback.
     /// Defaults to AliDNS, CloudFlare, Google for global reliability.
     /// CN users may want to put local ISP DNS first for better latency.
     #[serde(default = "default_dns_proxy_nameservers")]

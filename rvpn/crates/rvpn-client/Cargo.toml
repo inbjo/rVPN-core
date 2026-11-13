@@ -96,6 +96,9 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 [features]
 default = ["mimalloc"]
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+
 [target.'cfg(target_os = "ios")'.dependencies]
 security-framework = "2"
 

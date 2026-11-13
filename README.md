@@ -56,6 +56,77 @@ cargo fmt --check
 cargo clippy
 ```
 
+### Build artifacts and releases
+
+Pushes and pull requests build client/server binaries and retain them as Actions
+artifacts. Scheduled builds and manual runs on `main` update a single `nightly`
+tag and prerelease, replacing assets with the same names. After a successful
+nightly upload, older generated `nightly-YYYYMMDD-RUN_ID` prereleases and their
+tags are removed. Other version tags and releases are preserved.
+
+Publishing a GitHub Release builds its tagged commit and uploads the matching
+platform archives and checksums to that release. Rerunning the workflow replaces
+same-name assets without creating another release or version tag.
+
+### Client system service
+
+The CLI supports systemd on Linux, Windows Service Control Manager, and a
+system LaunchDaemon on macOS. Run these commands as root (Unix) or from an
+administrator terminal (Windows):
+
+```text
+rvpn --config /absolute/path/client.toml service install
+rvpn service start
+rvpn service status
+rvpn service stop
+rvpn service uninstall
+```
+
+On Windows use a Windows path, for example
+`rvpn.exe --config C:\rvpn\client.toml service install`.
+Installation enables startup at boot; use `service start` to start immediately.
+Linux requires systemd. Service names are `rvpn-client` (Linux/Windows) and
+`com.rvpn.client` (macOS). Installation does not copy the executable, config,
+or keys: keep them at their installed paths. Relative paths in the configuration
+are resolved from the directory in which `service install` was run.
+Put runtime settings in the configuration file; service installation rejects CLI
+overrides. Services run as root/LocalSystem, so set an explicit writable `data_dir`
+and ensure the service account can read the identity key and prekey bundle.
+Unix logs are available through `journalctl -u rvpn-client` (Linux) or
+`/var/log/rvpn-client.log` (macOS).
+
+### Client DNS over HTTPS
+
+DNS upstreams are configured directly in `dns_proxy.nameservers`. Use an
+IP address (optionally with a port) for UDP, or an HTTPS URL for DoH:
+
+```toml
+[dns_proxy]
+enabled = true
+listen_address = "127.0.0.1:53"
+nameservers = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
+```
+
+UDP and DoH entries can be mixed, for example
+`nameservers = ["https://1.1.1.1/dns-query", "223.5.5.5:53"]`.
+Upstreams are tried in configured order. To prevent plaintext fallback, list
+only DoH URLs. No extra UDP resolver or system resolver is used when a list
+containing DoH fails. DoH URLs must use IP addresses to avoid circular DNS
+resolution when the system DNS points at this proxy. HTTPS certificate
+validation stays enabled. Requests use wire format POST with HTTP/2 support,
+a five-second timeout, no redirects, and no environment HTTP proxy.
+
+These nameservers also serve client-side split-tunnel, direct connection, and
+VPN endpoint lookups. A nonempty `network.dns_servers` overrides this list for
+those lookups and accepts the same UDP/DoH syntax. Existing UDP-only resolver
+behavior is preserved. No separate `[network.doh]` section is needed.
+
+The optional local `[dns_proxy]` listener still accepts UDP queries from apps;
+DoH changes its local upstream transport. Tunnel-routed A/AAAA queries keep
+the existing encrypted WebSocket DNS path. In TUN mode, tunneled DNS packets
+keep their existing forwarding path; this setting controls client-side lookups
+and does not replace the remote server's resolver.
+
 ### Cross-compilation
 
 Install [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) and [zig](https://ziglang.org/):

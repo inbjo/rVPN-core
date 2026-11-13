@@ -190,7 +190,7 @@ async fn handle_direct_connection(
     target_port: u16,
 ) -> Result<()> {
     let target_addr = format!("{}:{}", target_host, target_port);
-    let mut target = tokio::net::TcpStream::connect(&target_addr)
+    let mut target = crate::websocket::connect_direct_tcp(target_host, target_port)
         .await
         .with_context(|| format!("Failed to connect to {}", target_addr))?;
 
