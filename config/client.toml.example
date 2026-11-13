@@ -1,0 +1,34 @@
+server_address = "wss://your.server.com/api/v1/ws"
+identity_key_file = "./identity.key"
+prekey_bundle = "./prekey-bundle.json"
+tls_fingerprint = "chrome"
+
+[socks5]
+listen_address = "127.0.0.1:1080"
+
+[http_proxy]
+enabled = true
+listen_address = "127.0.0.1:1088"
+
+[tun]
+enabled = false
+mtu = 1420
+routes = [ "0.0.0.0/0" ]
+
+[dns_proxy]
+enabled = true
+listen_address = "127.0.0.1:53"
+nameservers = [ "https://223.6.6.6/dns-query", "223.5.5.5:53", "1.1.1.1:53", "8.8.8.8:53" ]
+
+[split_tunnel]
+enabled = true
+builtin_bypass_countries = [ "CN" ]
+block_ads = true
+
+[network]
+prefer_ipv4 = true
+dns_cache_enabled = true
+
+[server_identity]
+trust_on_first_use = true
+strict = true

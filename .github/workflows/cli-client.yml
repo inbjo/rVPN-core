@@ -14,6 +14,7 @@ on:
       - rvpn/Cargo.lock
       - rvpn/Cargo.toml
       - rvpn/crates/**
+      - config/**
       - scripts/update_rule_data.py
       - scripts/test_update_rule_data.py
   pull_request:
@@ -22,6 +23,7 @@ on:
       - rvpn/Cargo.lock
       - rvpn/Cargo.toml
       - rvpn/crates/**
+      - config/**
       - scripts/update_rule_data.py
       - scripts/test_update_rule_data.py
 
@@ -85,6 +87,11 @@ jobs:
           $hash = (Get-FileHash target/release/rvpn-server.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  rvpn-server.exe" | Set-Content target/release/rvpn-server.exe.sha256 -Encoding ascii
 
+      - name: Stage example configurations
+        run: |
+          Copy-Item -LiteralPath ../config/client.toml.example -Destination target/release/client.toml.example
+          Copy-Item -LiteralPath ../config/server.toml.example -Destination target/release/server.toml.example
+
       - name: Upload Windows client
         uses: actions/upload-artifact@v7
         with:
@@ -92,6 +99,7 @@ jobs:
           path: |
             rvpn/target/release/rvpn.exe
             rvpn/target/release/rvpn.exe.sha256
+            rvpn/target/release/client.toml.example
           if-no-files-found: error
           compression-level: 0
 
@@ -102,6 +110,7 @@ jobs:
           path: |
             rvpn/target/release/rvpn-server.exe
             rvpn/target/release/rvpn-server.exe.sha256
+            rvpn/target/release/server.toml.example
           if-no-files-found: error
           compression-level: 0
 
@@ -165,6 +174,11 @@ jobs:
             (cd target/release && shasum -a 256 rvpn-server > rvpn-server.sha256)
           fi
 
+      - name: Stage example configurations
+        run: |
+          cp ../config/client.toml.example target/release/client.toml.example
+          cp ../config/server.toml.example target/release/server.toml.example
+
       - name: Upload client
         uses: actions/upload-artifact@v7
         with:
@@ -172,6 +186,7 @@ jobs:
           path: |
             rvpn/target/release/rvpn
             rvpn/target/release/rvpn.sha256
+            rvpn/target/release/client.toml.example
           if-no-files-found: error
           compression-level: 0
 
@@ -182,6 +197,7 @@ jobs:
           path: |
             rvpn/target/release/rvpn-server
             rvpn/target/release/rvpn-server.sha256
+            rvpn/target/release/server.toml.example
           if-no-files-found: error
           compression-level: 0
 
@@ -221,8 +237,10 @@ jobs:
             name="${dir##*/}"
             if [[ "$name" == rvpn-client-* ]]; then
               binary=rvpn
+              config=client.toml.example
             elif [[ "$name" == rvpn-server-* ]]; then
               binary=rvpn-server
+              config=server.toml.example
             else
               echo "Unexpected artifact: $name" >&2
               exit 1
@@ -232,18 +250,18 @@ jobs:
               (cd "$dir" && sha256sum -c "${binary}.sha256")
               if [[ "$name" == rvpn-client-* ]]; then
                 cp -R generated-rules "$dir/rules"
-                (cd "$dir" && zip -q -r "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256" rules)
+                (cd "$dir" && zip -q -r "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256" "$config" rules)
               else
-                (cd "$dir" && zip -q -j "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256")
+                (cd "$dir" && zip -q -j "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256" "$config")
               fi
             else
               (cd "$dir" && sha256sum -c "${binary}.sha256")
               chmod +x "$dir/$binary"
               if [[ "$name" == rvpn-client-* ]]; then
                 cp -R generated-rules "$dir/rules"
-                tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256" rules
+                tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256" "$config" rules
               else
-                tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256"
+                tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256" "$config"
               fi
             fi
             count=$((count + 1))
@@ -269,6 +287,7 @@ jobs:
           Automated CLI client and server builds for Windows, Linux, and macOS.
           Commit: ${GITHUB_SHA}
           Client archives include refreshed routing rules, source hashes, and upstream license notices.
+          Client and server archives each include their corresponding example configuration.
           See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup.
           This prerelease and its assets are replaced by each nightly build.
           EOF

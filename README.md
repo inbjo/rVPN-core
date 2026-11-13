@@ -68,6 +68,11 @@ Publishing a GitHub Release builds its tagged commit and uploads the matching
 platform archives and checksums to that release. Rerunning the workflow replaces
 same-name assets without creating another release or version tag.
 
+Client archives and Actions artifacts include `client.toml.example`; server
+archives and artifacts include `server.toml.example`. Copy the example to
+`client.toml` or `server.toml` and adjust it before starting. The originals live
+under `config/`, and changes there trigger a new build.
+
 ### Client configuration paths
 
 On Windows, Linux, and macOS, relative `--config` / `-c` paths are resolved
@@ -191,7 +196,7 @@ SOCKS5 mode with the same client configuration as other desktop builds.
 
 The workflow runs on relevant pushes, pull requests, and manual dispatch. After
 all platform jobs pass on `main`, it publishes separate client and server
-archives plus `SHA256SUMS.txt` as a dated nightly prerelease. It also rebuilds
+archives plus `SHA256SUMS.txt`, replacing the fixed `nightly` prerelease. It also rebuilds
 and publishes nightly at 02:00 UTC even when no source files changed.
 Windows TUN mode requires a compatible TUN driver and elevated privileges;
 the workflow checks CLI startup, not a live VPN connection. The server's
@@ -264,8 +269,9 @@ auto_reload_interval = 3600
 For automatic upstream updates, run the same command daily with cron or a
 systemd timer. For example, `0 3 * * * /usr/bin/python3 /opt/rvpn/scripts/update_rule_data.py --output-dir /var/lib/rvpn/rules`.
 The nightly client archives include the same generated files under `rules/`,
-including source hashes and upstream license notices. Server archives contain
-only the server executable. Extracting a client archive under `/var/lib/rvpn`
+including source hashes and upstream license notices, plus `client.toml.example`.
+Server archives contain the server executable, checksum, and `server.toml.example`.
+Extracting a client archive under `/var/lib/rvpn`
 provides the file paths used in the example above.
 Run the updater once or extract a client archive before enabling these file
 paths. If the country IP file later becomes unavailable, the client falls back
