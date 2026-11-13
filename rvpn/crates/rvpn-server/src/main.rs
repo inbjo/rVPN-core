@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    rvpn_server::key_init::initialize(&mut config, args.config.parent().context("Configuration has no parent directory")?)?;
     run_server(config).await
 }
 
@@ -1078,6 +1079,8 @@ fn keygen(config: &ServerConfig, output_path: Option<PathBuf>) -> Result<()> {
     );
     std::fs::write(&path, key_data)?;
     info!("Generated identity key: {:?}", path);
+    info!("Server public identity (Ed25519, base64): {}", BASE64.encode(identity.verifying_key.to_bytes()));
+    info!("Server identity fingerprint: {}", rvpn_core::identity_pin::encode_identity_pin(identity.verifying_key.as_bytes())?);
     Ok(())
 }
 
@@ -1182,14 +1185,18 @@ fn prekey_bundle(
     #[derive(Serialize)]
     struct PrivateKeyJson {
         signed_prekey_private: String,
+        public_bundle: rvpn_core::crypto::X3DHPublicBundle,
     }
 
     let private_json = serde_json::to_string_pretty(&PrivateKeyJson {
         signed_prekey_private: BASE64.encode(private_key),
+        public_bundle: bundle.clone(),
     })?;
 
     std::fs::write(&private_output_path, private_json)?;
     info!("Generated private key: {:?}", private_output_path);
+    info!("Server bundle identity fingerprint: {}", rvpn_core::identity_pin::encode_identity_pin(&bundle.identity_key)?);
+    info!("Distribute public bundle {} to clients; private key files stay on the server", output_path.display());
 
     Ok(())
 }

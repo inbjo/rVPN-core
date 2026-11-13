@@ -9,6 +9,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub mod cipher;
 pub mod ratchet;
 pub mod x3dh;
+pub mod key_files;
 
 pub use x3dh::{X3DHResponder, X3DHPublicBundle};
 pub use ratchet::{DoubleRatchet, RatchetMessage, RatchetMessageRef, MessageHeader};

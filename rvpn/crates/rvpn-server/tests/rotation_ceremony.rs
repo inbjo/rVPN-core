@@ -102,6 +102,32 @@ fn fresh_bundle_publishes_version_1_no_rotation() {
 }
 
 #[test]
+fn normal_startup_initializes_keys_once_and_logs_only_public_material() {
+    let dir = TempDir::new().unwrap();
+    let config = write_minimal_server_toml(dir.path(), "./keys/identity.key", "./public/bundle.json");
+    let mut snapshot = None;
+    for run in 0..2 {
+        // An invalid listen address stops startup after key initialization.
+        let output = Command::new(server_bin()).args(["-c", config.to_str().unwrap(), "--bind", "invalid-address"])
+            .current_dir(dir.path()).output().unwrap();
+        assert!(!output.status.success());
+        let logs = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(logs.contains("Server public identity (Ed25519, base64)"), "{logs}");
+        assert!(logs.contains("Server identity fingerprint: ik:1:"));
+        assert!(logs.contains(if run == 0 { "Generated server public prekey bundle:" } else { "Loaded matching server public bundle:" }));
+        let key = std::fs::read_to_string(dir.path().join("keys/identity.key")).unwrap();
+        let private = std::fs::read_to_string(dir.path().join("public/bundle.private.json")).unwrap();
+        let private_json: Value = serde_json::from_str(&private).unwrap();
+        assert!(!logs.contains(key.lines().nth(2).unwrap()), "Identity private key leaked");
+        assert!(!logs.contains(private_json["signed_prekey_private"].as_str().unwrap()), "Prekey private key leaked");
+        let public = std::fs::read(dir.path().join("public/bundle.json")).unwrap();
+        let files = (key, private, public);
+        if let Some(before) = &snapshot { assert_eq!(&files, before); }
+        snapshot = Some(files);
+    }
+}
+
+#[test]
 fn relative_config_keys_and_bundles_work_from_a_different_working_directory() {
     let dir = TempDir::new().unwrap();
     let working_directory = TempDir::new().unwrap();

@@ -53,6 +53,7 @@ data-encoding.workspace = true
 hex.workspace = true
 rand.workspace = true
 uuid.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

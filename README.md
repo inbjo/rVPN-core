@@ -130,6 +130,34 @@ Server `--identity`, `--rotate-from`, and explicit `--output` CLI overrides keep
 their working-directory semantics. `keygen` and `prekey-bundle` can run without
 a configuration; normal startup reports missing or invalid configurations.
 
+### First-run key initialization
+
+Normal startup automatically creates a missing client `identity_key_file`.
+The client still needs the **server's public** `prekey-bundle.json`; it cannot
+generate that file on the server's behalf. Missing bundle errors explain where
+the file must come from.
+
+Server startup initializes its identity and public bundle when deploying for
+the first time. If `prekey_bundle_file` is omitted, it defaults to
+`prekey-bundle.json` beside `server.toml`. The existing X3DH format also requires
+`prekey-bundle.private.json`, which stores the server's private prekey. Keep
+both private files on the server and distribute only the public JSON to clients.
+
+Startup and generation logs show file paths, generated/loaded status, public
+identity keys, fingerprints, and the bundle version. Private key contents are
+never logged. New private files are published atomically without replacing existing
+files; private files use mode `0600` on Linux/macOS. Parent directories are
+created as needed.
+
+Restarts preserve existing keys and bundles. Missing server identity or private
+prekey files are generated automatically, and the public bundle is atomically
+updated to match. Logs explicitly report identity changes and which public file
+must be copied to clients. A new server identity requires previously pinned
+clients to verify its new fingerprint. A missing public bundle is rebuilt from
+the existing keys and any stored bundle metadata. Corrupt existing files or
+inconsistent complete key sets cause an explicit error. The `keygen` and
+`prekey-bundle` commands remain available for explicit generation and rotation.
+
 ### Client system service
 
 The CLI supports systemd on Linux, Windows Service Control Manager, and a

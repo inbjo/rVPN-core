@@ -232,6 +232,7 @@ async fn async_main(args: Args) -> Result<()> {
         _ => {}
     }
 
+    rvpn_core::crypto::key_files::ensure_identity(&config.identity_key_file, "Client")?;
     websocket::configure_endpoint_dns(&config)?;
 
     // Run in appropriate mode based on config
@@ -764,6 +765,8 @@ fn keygen(output: PathBuf) -> Result<()> {
     }
 
     info!("Generated identity key: {:?}", output);
+    info!("Client public identity (Ed25519, base64): {}", BASE64.encode(identity.verifying_key.to_bytes()));
+    info!("Client identity fingerprint: {}", rvpn_core::identity_pin::encode_identity_pin(identity.verifying_key.as_bytes())?);
 
     Ok(())
 }

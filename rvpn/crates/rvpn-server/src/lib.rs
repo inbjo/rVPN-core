@@ -3,6 +3,7 @@
 pub mod config;
 pub mod decoy;
 pub mod handler;
+pub mod key_init;
 pub mod tun_server;
 
 #[cfg(test)]
