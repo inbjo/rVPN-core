@@ -65,7 +65,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rvpn -> target
-          key: windows-cli-thin-lto-8
+          # Refresh the immutable pre-test cache so both release and ci-test
+          # dependency artifacts are captured after the first successful run.
+          key: windows-cli-thin-lto-8-ci-test-v1
           cache-bin: "false"
 
       - name: Report cache lookup
@@ -75,10 +77,10 @@ jobs:
         run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins --timings
 
       - name: Test configuration and relative paths
-        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests --timings
+        run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn config::tests --timings
 
       - name: Test server configuration and relative paths
-        run: cargo test --release --locked --package rvpn-server --lib config::tests --timings
+        run: cargo test --profile ci-test --locked --package rvpn-server --lib config::tests --timings
 
       - name: Upload build timing reports
         if: always()
@@ -168,7 +170,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rvpn -> target
-          key: cli-thin-lto-8-rvpn-${{ matrix.artifact }}
+          # This cache includes dependencies for both production and ci-test.
+          key: cli-thin-lto-8-ci-test-v1-rvpn-${{ matrix.artifact }}
           cache-bin: "false"
 
       - name: Report cache lookup
@@ -178,10 +181,10 @@ jobs:
         run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins --timings
 
       - name: Test configuration and relative paths
-        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests --timings
+        run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn config::tests --timings
 
       - name: Test server configuration and relative paths
-        run: cargo test --release --locked --package rvpn-server --lib config::tests --timings
+        run: cargo test --profile ci-test --locked --package rvpn-server --lib config::tests --timings
 
       - name: Upload build timing reports
         if: always()

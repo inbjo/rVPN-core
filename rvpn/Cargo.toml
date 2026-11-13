@@ -127,3 +127,13 @@ panic = "abort"
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Configuration tests need fast compilation, not release-size optimization.
+# Keep their unwind dependencies separate from the shipped abort binaries.
+[profile.ci-test]
+inherits = "dev"
+opt-level = 0
+debug = 0
+lto = "off"
+codegen-units = 16
+incremental = false

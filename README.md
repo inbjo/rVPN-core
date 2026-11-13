@@ -77,6 +77,17 @@ Each platform also uploads a separate `build-timings-*` Actions artifact with
 Cargo's HTML compilation reports. Cache exact-match status appears in the job
 summary. These diagnostics are separate from release archives.
 
+Configuration tests use the `ci-test` profile, with optimization, debug symbols,
+LTO, and incremental compilation disabled. Dependency caches retain both the
+release and test profiles; the first run with a new cache key warms both sets.
+To run the same checks locally:
+
+```bash
+cd rvpn
+cargo test --profile ci-test --locked -p rvpn-client --bin rvpn config::tests
+cargo test --profile ci-test --locked -p rvpn-server --lib config::tests
+```
+
 ### Configuration paths
 
 For both client and server on Windows, Linux, and macOS, relative `--config` / `-c` paths are resolved
