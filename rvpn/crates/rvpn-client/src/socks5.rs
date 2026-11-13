@@ -225,7 +225,7 @@ impl Socks5Proxy {
 
             tokio::spawn(async move {
                 if let Err(e) = handle_connection(socket, addr, proxy).await {
-                    error!("SOCKS5 connection error from {}: {}", addr, e);
+                    error!("SOCKS5 connection error from {}: {:#}", addr, e);
                 }
             });
         }

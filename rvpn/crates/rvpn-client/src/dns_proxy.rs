@@ -353,7 +353,7 @@ impl DnsProxy {
                 }
                 Err(e) => {
                     warn!(
-                        "DNS proxy: WebSocket error: {}, reconnecting in {}s...",
+                        "DNS proxy: WebSocket error: {:#}, reconnecting in {}s...",
                         e, backoff_secs
                     );
                 }

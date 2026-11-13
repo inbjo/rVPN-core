@@ -157,6 +157,18 @@ and ensure the service account can read the identity key and prekey bundle.
 Unix logs are available through `journalctl -u rvpn-client` (Linux) or
 `/var/log/rvpn-client.log` (macOS).
 
+### Client TLS trust
+
+Desktop VPN connections load CA certificates from the Windows certificate
+store, macOS Keychain, or Linux system CA bundle. BoringSSL still performs
+certificate-chain and hostname verification and provides the Chrome TLS
+fingerprint. No separate CA file is needed for certificates trusted by the OS.
+The trust anchors are loaded once per process; restart the client after changing
+system trust settings. `SSL_CERT_FILE` / `SSL_CERT_DIR`, when set, override the
+system certificate source. An empty or unusable trust store causes a connection
+error. DNS, SOCKS5, and HTTP proxy connection errors include the underlying error
+chain so certificate failures remain visible.
+
 ### Client DNS over HTTPS
 
 DNS upstreams are configured directly in `dns_proxy.nameservers`. Use an

@@ -82,6 +82,9 @@ jobs:
       - name: Test server configuration and relative paths
         run: cargo test --profile ci-test --locked --package rvpn-server --lib config::tests --timings
 
+      - name: Test system TLS trust and certificate verification
+        run: cargo test --profile ci-test --locked --package rvpn-tls --lib tls_boring::tests --timings
+
       - name: Upload build timing reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -185,6 +188,9 @@ jobs:
 
       - name: Test server configuration and relative paths
         run: cargo test --profile ci-test --locked --package rvpn-server --lib config::tests --timings
+
+      - name: Test system TLS trust and certificate verification
+        run: cargo test --profile ci-test --locked --package rvpn-tls --lib tls_boring::tests --timings
 
       - name: Upload build timing reports
         if: always()

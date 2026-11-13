@@ -158,7 +158,7 @@ impl HttpProxy {
 
             tokio::spawn(async move {
                 if let Err(e) = handle_connection(socket, addr, proxy, auth_config).await {
-                    debug!("HTTP connection error from {}: {}", addr, e);
+                    warn!("HTTP connection error from {}: {:#}", addr, e);
                 }
             });
         }
