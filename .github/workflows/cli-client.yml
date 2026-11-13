@@ -185,7 +185,8 @@ jobs:
     if: >-
       (github.event_name == 'release' && github.event.release.tag_name != 'nightly') ||
       (github.ref == 'refs/heads/main' &&
-       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+       (github.event_name == 'push' || github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch'))
     runs-on: ubuntu-24.04
     concurrency:
       group: release-assets-${{ github.event_name == 'release' && github.event.release.tag_name || 'nightly' }}

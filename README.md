@@ -59,7 +59,7 @@ cargo clippy
 ### Build artifacts and releases
 
 Pushes and pull requests build client/server binaries and retain them as Actions
-artifacts. Scheduled builds and manual runs on `main` update a single `nightly`
+artifacts. Pushes, scheduled builds, and manual runs on `main` update a single `nightly`
 tag and prerelease, replacing assets with the same names. After a successful
 nightly upload, older generated `nightly-YYYYMMDD-RUN_ID` prereleases and their
 tags are removed. Other version tags and releases are preserved.
