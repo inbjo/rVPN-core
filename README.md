@@ -97,6 +97,9 @@ pushes and pull requests that change Rust sources or the workflow, and can also
 be started manually from GitHub Actions. Each successful platform job provides
 an artifact with both executables and their SHA-256 checksums. Use SOCKS5 mode with
 the same client configuration as other desktop builds.
+After all platform jobs pass on `main`, the workflow publishes their archives
+and `SHA256SUMS.txt` as a dated nightly prerelease. It also rebuilds and
+publishes nightly at 02:00 UTC even when no source files changed.
 Windows TUN mode requires a compatible TUN driver and elevated privileges;
 the workflow checks CLI startup, not a live VPN connection. The server's
 automatic TUN route setup currently uses Linux `ip` commands, so server TUN
