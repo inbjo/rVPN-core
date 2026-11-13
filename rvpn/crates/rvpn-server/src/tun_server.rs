@@ -245,12 +245,14 @@ impl TunServer {
             .with_context(|| format!("Invalid TUN IP: {}", self.config.tun_ip))?;
 
         // Create TUN device
-        let device = DeviceBuilder::new()
+        let builder = DeviceBuilder::new()
             .name(&self.config.interface_name)
             .mtu(self.config.mtu)
             .layer(tun_rs::Layer::L3) // TUN is L3 (IP packets)
-            .ipv4(ip_addr, prefix_len, None)
-            .packet_information(false)
+            .ipv4(ip_addr, prefix_len, None);
+        #[cfg(not(windows))]
+        let builder = builder.packet_information(false);
+        let device = builder
             .build_sync()
             .with_context(|| {
                 format!(

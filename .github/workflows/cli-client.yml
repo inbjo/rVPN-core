@@ -1,0 +1,148 @@
+name: CLI client and server
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cli-client.yml
+      - rvpn/Cargo.lock
+      - rvpn/Cargo.toml
+      - rvpn/crates/**
+  pull_request:
+    paths:
+      - .github/workflows/cli-client.yml
+      - rvpn/Cargo.lock
+      - rvpn/Cargo.toml
+      - rvpn/crates/**
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: rvpn
+        shell: pwsh
+    env:
+      CARGO_INCREMENTAL: "0"
+      # The workspace's fat LTO / single codegen unit is optimized for size.
+      # Thin LTO with parallel codegen shortens CI builds of the CLI.
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rvpn -> target
+          key: windows-cli-thin-lto-8
+          cache-bin: "false"
+
+      - name: Build Windows CLI client and server
+        run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins
+
+      - name: Check executable and checksum
+        run: |
+          $exe = 'target/release/rvpn.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & target/release/rvpn-server.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  rvpn.exe" | Set-Content target/release/rvpn.exe.sha256 -Encoding ascii
+          $hash = (Get-FileHash target/release/rvpn-server.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  rvpn-server.exe" | Set-Content target/release/rvpn-server.exe.sha256 -Encoding ascii
+
+      - name: Upload Windows CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: rvpn-windows-x86_64
+          path: |
+            rvpn/target/release/rvpn.exe
+            rvpn/target/release/rvpn.exe.sha256
+            rvpn/target/release/rvpn-server.exe
+            rvpn/target/release/rvpn-server.exe.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+  unix:
+    name: ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            artifact: rvpn-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            artifact: rvpn-linux-aarch64
+          - runner: macos-15-intel
+            artifact: rvpn-macos-x86_64
+          - runner: macos-15
+            artifact: rvpn-macos-aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: rvpn
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rvpn -> target
+          key: cli-thin-lto-8-${{ matrix.artifact }}
+          cache-bin: "false"
+
+      - name: Build CLI client and server
+        run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins
+
+      - name: Check executable and checksum
+        run: |
+          set -euo pipefail
+          ./target/release/rvpn --version
+          ./target/release/rvpn --help >/dev/null
+          ./target/release/rvpn-server --help >/dev/null
+          if command -v sha256sum >/dev/null; then
+            (cd target/release && sha256sum rvpn > rvpn.sha256)
+            (cd target/release && sha256sum rvpn-server > rvpn-server.sha256)
+          else
+            (cd target/release && shasum -a 256 rvpn > rvpn.sha256)
+            (cd target/release && shasum -a 256 rvpn-server > rvpn-server.sha256)
+          fi
+
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            rvpn/target/release/rvpn
+            rvpn/target/release/rvpn.sha256
+            rvpn/target/release/rvpn-server
+            rvpn/target/release/rvpn-server.sha256
+          if-no-files-found: error
+          compression-level: 0

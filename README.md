@@ -86,17 +86,21 @@ On Windows with the MSVC Rust toolchain installed, build the command-line client
 
 ```powershell
 cd rvpn
-cargo build --release --locked --package rvpn-client --bin rvpn
+cargo build --release --locked --package rvpn-client --package rvpn-server --bins
 .\target\release\rvpn.exe --help
+.\target\release\rvpn-server.exe --help
 ```
 
-The [Windows CLI client workflow](.github/workflows/windows-client.yml) runs on
-pushes and pull requests that change Rust sources or the workflow. It can also
-be started manually from GitHub Actions. Each successful run provides a
-`rvpn-windows-x86_64-cli` artifact containing `rvpn.exe` and its SHA-256 checksum.
-Use SOCKS5 mode with the same client configuration as other desktop builds.
+The [CLI build workflow](.github/workflows/cli-client.yml) builds Windows
+x86_64, Linux x86_64/ARM64, and macOS Intel/Apple Silicon clients and servers. It runs on
+pushes and pull requests that change Rust sources or the workflow, and can also
+be started manually from GitHub Actions. Each successful platform job provides
+an artifact with both executables and their SHA-256 checksums. Use SOCKS5 mode with
+the same client configuration as other desktop builds.
 Windows TUN mode requires a compatible TUN driver and elevated privileges;
-the workflow checks CLI startup, not a live VPN connection.
+the workflow checks CLI startup, not a live VPN connection. The server's
+automatic TUN route setup currently uses Linux `ip` commands, so server TUN
+mode also needs platform-specific routing work outside Linux.
 
 ### Mobile library
 
