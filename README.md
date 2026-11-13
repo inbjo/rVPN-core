@@ -80,7 +80,7 @@ cargo zigbuild --release --target armv7-unknown-linux-gnueabihf
 cargo zigbuild --release --target x86_64-unknown-linux-musl
 ```
 
-### Windows CLI client
+### Desktop CLI builds
 
 On Windows with the MSVC Rust toolchain installed, build the command-line client:
 
@@ -92,14 +92,15 @@ cargo build --release --locked --package rvpn-client --package rvpn-server --bin
 ```
 
 The [CLI build workflow](.github/workflows/cli-client.yml) builds Windows
-x86_64, Linux x86_64/ARM64, and macOS Intel/Apple Silicon clients and servers. It runs on
-pushes and pull requests that change Rust sources or the workflow, and can also
-be started manually from GitHub Actions. Each successful platform job provides
-an artifact with both executables and their SHA-256 checksums. Use SOCKS5 mode with
-the same client configuration as other desktop builds.
-After all platform jobs pass on `main`, the workflow publishes their archives
-and `SHA256SUMS.txt` as a dated nightly prerelease. It also rebuilds and
-publishes nightly at 02:00 UTC even when no source files changed.
+x86_64, Linux x86_64/ARM64, and macOS Intel/Apple Silicon clients and servers.
+The client (`rvpn`) and server (`rvpn-server`) are separate executables. Each
+platform job uploads separate client and server artifacts with checksums. Use
+SOCKS5 mode with the same client configuration as other desktop builds.
+
+The workflow runs on relevant pushes, pull requests, and manual dispatch. After
+all platform jobs pass on `main`, it publishes separate client and server
+archives plus `SHA256SUMS.txt` as a dated nightly prerelease. It also rebuilds
+and publishes nightly at 02:00 UTC even when no source files changed.
 Windows TUN mode requires a compatible TUN driver and elevated privileges;
 the workflow checks CLI startup, not a live VPN connection. The server's
 automatic TUN route setup currently uses Linux `ip` commands, so server TUN

@@ -69,32 +69,40 @@ jobs:
           $hash = (Get-FileHash target/release/rvpn-server.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  rvpn-server.exe" | Set-Content target/release/rvpn-server.exe.sha256 -Encoding ascii
 
-      - name: Upload Windows CLI
+      - name: Upload Windows client
         uses: actions/upload-artifact@v7
         with:
-          name: rvpn-windows-x86_64
+          name: rvpn-client-windows-x86_64
           path: |
             rvpn/target/release/rvpn.exe
             rvpn/target/release/rvpn.exe.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Windows server
+        uses: actions/upload-artifact@v7
+        with:
+          name: rvpn-server-windows-x86_64
+          path: |
             rvpn/target/release/rvpn-server.exe
             rvpn/target/release/rvpn-server.exe.sha256
           if-no-files-found: error
           compression-level: 0
 
   unix:
-    name: ${{ matrix.artifact }}
+    name: rvpn-${{ matrix.artifact }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
-            artifact: rvpn-linux-x86_64
+            artifact: linux-x86_64
           - runner: ubuntu-24.04-arm
-            artifact: rvpn-linux-aarch64
+            artifact: linux-aarch64
           - runner: macos-15-intel
-            artifact: rvpn-macos-x86_64
+            artifact: macos-x86_64
           - runner: macos-15
-            artifact: rvpn-macos-aarch64
+            artifact: macos-aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     defaults:
@@ -118,7 +126,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rvpn -> target
-          key: cli-thin-lto-8-${{ matrix.artifact }}
+          key: cli-thin-lto-8-rvpn-${{ matrix.artifact }}
           cache-bin: "false"
 
       - name: Build CLI client and server
@@ -138,13 +146,21 @@ jobs:
             (cd target/release && shasum -a 256 rvpn-server > rvpn-server.sha256)
           fi
 
-      - name: Upload CLI
+      - name: Upload client
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: rvpn-client-${{ matrix.artifact }}
           path: |
             rvpn/target/release/rvpn
             rvpn/target/release/rvpn.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload server
+        uses: actions/upload-artifact@v7
+        with:
+          name: rvpn-server-${{ matrix.artifact }}
+          path: |
             rvpn/target/release/rvpn-server
             rvpn/target/release/rvpn-server.sha256
           if-no-files-found: error
@@ -169,15 +185,32 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          count=0
           for dir in downloads/rvpn-*; do
             name="${dir##*/}"
-            if [[ "$name" == rvpn-windows-* ]]; then
-              (cd "$dir" && zip -q -j "${GITHUB_WORKSPACE}/dist/${name}.zip" rvpn.exe rvpn.exe.sha256 rvpn-server.exe rvpn-server.exe.sha256)
+            if [[ "$name" == rvpn-client-* ]]; then
+              binary=rvpn
+            elif [[ "$name" == rvpn-server-* ]]; then
+              binary=rvpn-server
             else
-              chmod +x "$dir/rvpn" "$dir/rvpn-server"
-              tar -czf "dist/${name}.tar.gz" -C "$dir" rvpn rvpn.sha256 rvpn-server rvpn-server.sha256
+              echo "Unexpected artifact: $name" >&2
+              exit 1
             fi
+            if [[ "$name" == *-windows-* ]]; then
+              binary="${binary}.exe"
+              (cd "$dir" && sha256sum -c "${binary}.sha256")
+              (cd "$dir" && zip -q -j "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256")
+            else
+              (cd "$dir" && sha256sum -c "${binary}.sha256")
+              chmod +x "$dir/$binary"
+              tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256"
+            fi
+            count=$((count + 1))
           done
+          if [[ "$count" -ne 10 ]]; then
+            echo "Expected 10 client/server artifacts, found $count" >&2
+            exit 1
+          fi
           (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS.txt)
 
       - name: Publish prerelease
@@ -191,5 +224,5 @@ jobs:
           tag="nightly-${date_utc}-${GITHUB_RUN_ID}"
           gh release create "$tag" dist/* \
             --title "Nightly ${date_utc} (${GITHUB_SHA:0:7})" \
-            --notes "Automated CLI client and server builds for Windows, Linux, and macOS. Each archive contains both binaries and their checksums. See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup." \
+            --notes "Automated CLI client and server builds for Windows, Linux, and macOS. Client and server are separate archives, each with its own checksum. See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup." \
             --prerelease --target "$GITHUB_SHA"
