@@ -18,7 +18,7 @@
 //!
 //! Supported countries: CN, HK, SG, JP, KR, TW (and more via configuration)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -86,6 +86,8 @@ struct SplitTunnelData {
     bypass_networks: IpNetworkTable<bool>,
     /// Domains that should bypass VPN
     bypass_domains: HashSet<String>,
+    country_domains: HashSet<String>,
+    country_networks: HashMap<String, Vec<IpNetwork>>,
     /// Networks that must go through VPN
     tunnel_networks: IpNetworkTable<bool>,
     /// Domains that must go through VPN
@@ -125,6 +127,8 @@ impl Clone for SplitTunnelData {
         Self {
             bypass_networks,
             bypass_domains: self.bypass_domains.clone(),
+            country_domains: self.country_domains.clone(),
+            country_networks: self.country_networks.clone(),
             tunnel_networks,
             tunnel_domains: self.tunnel_domains.clone(),
             block_domains: self.block_domains.clone(),
@@ -138,6 +142,8 @@ impl Default for SplitTunnelData {
         Self {
             bypass_networks: IpNetworkTable::new(),
             bypass_domains: HashSet::new(),
+            country_domains: HashSet::new(),
+            country_networks: HashMap::new(),
             tunnel_networks: IpNetworkTable::new(),
             tunnel_domains: HashSet::new(),
             block_domains: HashSet::new(),
@@ -299,6 +305,7 @@ impl SplitTunnel {
         // held across it, the config auto-reload writer would queue on the
         // write-preferring RwLock and block ALL new readers for the duration
         // of those retries — a periodic total DNS/routing stall.
+        let dynamic_cn_domain = Self::matches_domain(host, &data.country_domains);
         drop(data);
 
         // Check built-in force tunnel domains (Google, Facebook, etc.)
@@ -311,11 +318,11 @@ impl SplitTunnel {
         // Check built-in China domains if CN is in bypass countries
         // SECURITY: Validate resolved IPs are in China before bypassing to prevent DNS rebinding
         if self.config.builtin_bypass_countries.contains(&"CN".to_string())
-            && matches_china_domain(host)
+            && (matches_china_domain(host) || dynamic_cn_domain)
         {
             debug!("Host {} matches built-in China domain list, validating IPs", host);
             if let Some(ip_addrs) = self.resolve_host_to_ips(host).await {
-                if self.ips_match_country(&ip_addrs, "CN") {
+                if self.ips_match_country(&ip_addrs, "CN").await {
                     debug!("Host {} resolved IPs are in China, bypassing", host);
                     return RoutingDecision::Bypass;
                 }
@@ -365,20 +372,11 @@ impl SplitTunnel {
     }
 
     /// Check if any IP in the list belongs to the specified country CIDR ranges
-    fn ips_match_country(&self, ips: &[IpAddr], country: &str) -> bool {
-        if let Some(country_cidrs) = get_country_ips(country) {
-            for ip in ips {
-                for cidr in country_cidrs {
-                    // Parse CIDR string like "1.0.1.0/24"
-                    if let Ok(network) = cidr.parse::<IpNetwork>() {
-                        if network.contains(*ip) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+    async fn ips_match_country(&self, ips: &[IpAddr], country: &str) -> bool {
+        let data = self.data.read().await;
+        data.country_networks
+            .get(country)
+            .is_some_and(|networks| ips.iter().any(|ip| networks.iter().any(|network| network.contains(*ip))))
     }
 
     /// Make a routing decision for a single IP address
@@ -505,29 +503,38 @@ impl SplitTunnel {
 
         // Load IP ranges for configured countries.
         // Priority: country_ips_file (dynamic) > builtin_ips (compiled-in)
+        let mut use_builtin_country_ips = config.country_ips_file.is_none();
         if let Some(ref path) = config.country_ips_file {
             match Self::load_country_ips_file(path, &config.builtin_bypass_countries).await {
-                Ok(cidrs) => {
-                    let count = cidrs.len();
-                    for cidr in cidrs {
-                        data.bypass_networks.insert(cidr, true);
+                Ok(by_country) => {
+                    let mut count = 0;
+                    for (country, cidrs) in by_country {
+                        count += cidrs.len();
+                        for cidr in &cidrs {
+                            data.bypass_networks.insert(cidr.clone(), true);
+                        }
+                        data.country_networks.insert(country, cidrs);
                     }
                     info!("Loaded {} bypass IPs from country_ips_file {:?}", count, path);
                 }
                 Err(e) => {
                     warn!("Failed to load country IPs from {:?}: {}", path, e);
+                    use_builtin_country_ips = true;
                 }
             }
-        } else {
-            // Fall back to compiled-in builtin IPs
+        }
+        if use_builtin_country_ips {
+            // Fall back to compiled-in IPs if the external file is unavailable.
             for country_code in &config.builtin_bypass_countries {
                 if let Some(ip_ranges) = get_country_ips(country_code) {
                     let mut loaded = 0;
                     let mut failed = 0;
+                    let mut networks = Vec::new();
                     for cidr in ip_ranges {
                         match cidr.parse::<IpNetwork>() {
                             Ok(network) => {
-                                data.bypass_networks.insert(network, true);
+                                data.bypass_networks.insert(network.clone(), true);
+                                networks.push(network);
                                 loaded += 1;
                             }
                             Err(e) => {
@@ -536,6 +543,7 @@ impl SplitTunnel {
                             }
                         }
                     }
+                    data.country_networks.insert(country_code.clone(), networks);
                     info!("Loaded {} built-in {} IP ranges ({} failed)", loaded, country_code, failed);
                 } else {
                     warn!("Unknown country code for built-in IPs: {}", country_code);
@@ -560,6 +568,17 @@ impl SplitTunnel {
         }
 
         // Load bypass domains
+        if let Some(ref path) = config.country_domains_file {
+            match Self::load_domains(path).await {
+                Ok(domains) => {
+                    info!("Loaded {} country domain candidates from {:?}", domains.len(), path);
+                    data.country_domains.extend(domains);
+                }
+                Err(e) => warn!("Failed to load country domains from {:?}: {}", path, e),
+            }
+        }
+
+        // Load unconditional bypass domains
         if let Some(ref path) = config.bypass_domains_file {
             match Self::load_domains(path).await {
                 Ok(domains) => {
@@ -604,7 +623,7 @@ impl SplitTunnel {
         }
 
         // Load ad-block domains
-        if let Some(ref path) = config.ad_block_file {
+        if let Some(path) = config.ad_block_file.as_ref().filter(|_| config.block_ads) {
             match Self::load_domains(path).await {
                 Ok(domains) => {
                     let count = domains.len();
@@ -644,23 +663,28 @@ impl SplitTunnel {
     /// Load country IPs from a JSON file.
     /// Format: {"CN": ["1.0.1.0/24", ...], "HK": [...]}
     /// Only loads CIDRs for the specified country codes.
-    async fn load_country_ips_file(path: &Path, countries: &[String]) -> Result<Vec<IpNetwork>> {
+    async fn load_country_ips_file(path: &Path, countries: &[String]) -> Result<HashMap<String, Vec<IpNetwork>>> {
         let content = tokio::fs::read_to_string(path).await?;
-        let map: std::collections::HashMap<String, Vec<String>> = serde_json::from_str(&content)
-            .unwrap_or_else(|_| std::collections::HashMap::new());
+        let map: std::collections::HashMap<String, Vec<String>> = serde_json::from_str(&content)?;
 
-        let mut networks = Vec::new();
+        let mut by_country = HashMap::new();
         for country_code in countries {
-            if let Some(cidrs) = map.get(country_code) {
-                for cidr in cidrs {
-                    match cidr.parse::<IpNetwork>() {
-                        Ok(n) => networks.push(n),
-                        Err(e) => debug!("Invalid CIDR {} in {}: {}", cidr, country_code, e),
-                    }
+            let cidrs = map.get(country_code).ok_or_else(|| {
+                anyhow::anyhow!("country IP file has no entry for {}", country_code)
+            })?;
+            let mut networks = Vec::new();
+            for cidr in cidrs {
+                match cidr.parse::<IpNetwork>() {
+                    Ok(n) => networks.push(n),
+                    Err(e) => debug!("Invalid CIDR {} in {}: {}", cidr, country_code, e),
                 }
             }
+            if networks.is_empty() {
+                anyhow::bail!("country IP file contains no valid CIDRs for {}", country_code);
+            }
+            by_country.insert(country_code.clone(), networks);
         }
-        Ok(networks)
+        Ok(by_country)
     }
 
     /// Load networks from a file (one CIDR per line)
@@ -1093,5 +1117,92 @@ mod tests {
                 "missing file must leave tunnel_domains empty (visible in startup stats)"
             );
         });
+    }
+
+    #[cfg(feature = "builtin-ips")]
+    #[test]
+    fn invalid_country_ips_file_falls_back_to_compiled_ranges() {
+        let path = std::env::temp_dir().join(format!(
+            "rvpn-invalid-country-ips-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "not JSON").unwrap();
+        let config = SplitTunnelConfig {
+            enabled: true,
+            auto_reload_interval: 0,
+            builtin_bypass_countries: vec!["CN".to_string()],
+            country_ips_file: Some(path.clone()),
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let split_tunnel = SplitTunnel::new(
+                config,
+                Arc::new(DnsResolver::new(true, 300, 1000, false, true, vec![])),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                split_tunnel.decide_by_ip("1.0.1.1".parse().unwrap()).await,
+                RoutingDecision::Bypass
+            );
+        });
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn generated_rule_files_route_and_block_only_when_enabled() {
+        let dir = std::env::temp_dir().join(format!(
+            "rvpn-generated-rules-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ad-domains.txt"), "ads.example.org\n").unwrap();
+        std::fs::write(
+            dir.join("country-domains-cn.txt"),
+            "shop.example.cn\noutside.example.cn\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("country-ips.json"), r#"{"CN":["7.7.7.0/24"]}"#).unwrap();
+        let mut config = SplitTunnelConfig {
+            enabled: true,
+            block_ads: true,
+            auto_reload_interval: 0,
+            ad_block_file: Some(dir.join("ad-domains.txt")),
+            country_domains_file: Some(dir.join("country-domains-cn.txt")),
+            country_ips_file: Some(dir.join("country-ips.json")),
+            builtin_bypass_countries: vec!["CN".to_string()],
+            ..Default::default()
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let resolver = Arc::new(DnsResolver::new(true, 300, 1000, false, true, vec![]));
+            resolver
+                .store_with_ttl("shop.example.cn", vec!["7.7.7.7".parse().unwrap()], Duration::from_secs(300))
+                .await;
+            resolver
+                .store_with_ttl("outside.example.cn", vec!["8.8.8.8".parse().unwrap()], Duration::from_secs(300))
+                .await;
+            let enabled = SplitTunnel::new(config.clone(), Arc::clone(&resolver)).await.unwrap();
+            assert_eq!(enabled.decide_by_host("sub.ads.example.org").await, RoutingDecision::Block);
+            assert_eq!(enabled.decide_by_host("shop.example.cn").await, RoutingDecision::Bypass);
+            assert_eq!(enabled.decide_by_host("outside.example.cn").await, RoutingDecision::Tunnel);
+            assert_eq!(enabled.decide_by_ip("7.7.7.7".parse().unwrap()).await, RoutingDecision::Bypass);
+
+            config.block_ads = false;
+            let disabled = SplitTunnel::new(config, resolver).await.unwrap();
+            assert_eq!(disabled.decide_by_host("ads.example.org").await, RoutingDecision::Tunnel);
+        });
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

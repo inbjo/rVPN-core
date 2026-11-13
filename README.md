@@ -123,6 +123,57 @@ cargo build --release --package rvpn-mobile --target aarch64-linux-android --fea
 
 The native app source code (Swift, Kotlin/Flutter) is not included in this repository.
 
+### Routing rule data
+
+The client first classifies proxied destinations by domain, then by resolved IP.
+Configured tunnel domains and networks take priority over bypass lists; unmatched
+traffic goes through the VPN. With `block_ads = true`, matching ad domains are
+blocked before normal domain routing. The desktop CLI uses the shared
+`rvpn-split-tunnel` rule engine for SOCKS5 and optional HTTP/DNS proxy modes.
+
+The built-in data is a fixed snapshot: country CIDRs are attributed to APNIC,
+China domains to `felixonmars/dnsmasq-china-list`, and ad domains to older
+curated lists. Force-tunnel domains are maintained in this repository and have
+no single upstream feed. Built-in data does not refresh itself.
+
+Run the source-aware updater to create external rule files:
+
+```bash
+python3 scripts/update_rule_data.py --output-dir /var/lib/rvpn/rules
+```
+
+It downloads AdGuard DNS filter (`filter_1.txt`), AdAway hosts via AdGuard
+(`filter_2.txt`), the China domain list, and APNIC delegations. It converts
+domain-only blocking rules and hosts entries to plain domain names, and APNIC
+records to `country-ips.json`. China domain candidates still require an IP
+match in the selected country's CIDRs before bypassing the VPN. APNIC records
+describe allocation country, not guaranteed current server location. URL/regex
+rules and exceptions that cannot be represented by domain matching are skipped.
+`sources.json` records source URLs,
+SHA-256 hashes, update time, and rule counts. Every output file is staged and
+replaced atomically after download and minimum-count validation; a failed
+update leaves the previous files in place.
+
+Point `client.toml` at the generated files:
+
+```toml
+[split_tunnel]
+enabled = true
+block_ads = true
+ad_block_file = "/var/lib/rvpn/rules/ad-domains.txt"
+country_domains_file = "/var/lib/rvpn/rules/country-domains-cn.txt"
+country_ips_file = "/var/lib/rvpn/rules/country-ips.json"
+builtin_bypass_countries = ["CN"]
+auto_reload_interval = 3600
+```
+
+`block_ads = false` disables ad blocking even when the file is present.
+`auto_reload_interval` rereads the files; it does not download new versions.
+For automatic upstream updates, run the same command daily with cron or a
+systemd timer. For example, `0 3 * * * /usr/bin/python3 /opt/rvpn/scripts/update_rule_data.py --output-dir /var/lib/rvpn/rules`.
+Run the updater once before enabling these file paths. If the country IP file
+later becomes unavailable, the client falls back to its compiled-in CIDRs.
+
 ## Usage
 
 ### Generate keys

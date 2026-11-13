@@ -20,6 +20,10 @@ pub struct SplitTunnelConfig {
     #[serde(default, alias = "bypass_domains_file")]
     pub bypass_domains_file: Option<PathBuf>,
 
+    /// Country domain candidates; bypass only after their IPs match that country.
+    #[serde(default, alias = "country_domains_file")]
+    pub country_domains_file: Option<PathBuf>,
+
     /// Networks that must go through VPN (CIDR format, one per line)
     #[serde(default, alias = "tunnel_networks_file")]
     pub tunnel_networks_file: Option<PathBuf>,
@@ -67,6 +71,7 @@ impl Default for SplitTunnelConfig {
             enabled: false,
             bypass_networks_file: None,
             bypass_domains_file: None,
+            country_domains_file: None,
             tunnel_networks_file: None,
             tunnel_domains_file: None,
             auto_reload_interval: 86400,                      // 24 hours
