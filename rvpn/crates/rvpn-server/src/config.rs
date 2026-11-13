@@ -1,6 +1,8 @@
 //! Server configuration
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -129,7 +131,7 @@ pub struct AcmeConfig {
     pub contacts: Vec<String>,
 
     /// Directory to persist the ACME account key and issued certificates.
-    /// Defaults to `"acme-cache"` next to the server binary.
+    /// Defaults to `"acme-cache"` beside the configuration file.
     #[serde(default = "default_acme_cache_dir")]
     pub cache_dir: PathBuf,
 
@@ -157,25 +159,64 @@ fn default_acme_cache_dir() -> PathBuf {
 }
 
 impl ServerConfig {
-    /// Load configuration from file
-    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
+    /// Load wrapped or root-level TOML/JSON, resolving files beside the config.
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let path = resolve_path(path, &std::env::current_dir()?);
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read server configuration: {}", path.display()))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        match ext {
+        let mut config: Self = match ext {
             "toml" => {
-                // Try parsing with [server] section first (documented format)
-                // If that fails, try root level (direct format)
-                if let Ok(wrapper) = toml::from_str::<ConfigWrapper>(&content) {
-                    Ok(wrapper.server)
+                let value: toml::Value = toml::from_str(&content)?;
+                if value.get("server").is_some() {
+                    let wrapper: ConfigWrapper = value.try_into()?;
+                    wrapper.server
                 } else {
-                    // Fall back to direct parsing for root-level format
-                    Ok(toml::from_str(&content)?)
+                    value.try_into()?
                 }
             }
-            "json" => Ok(serde_json::from_str(&content)?),
+            "json" => {
+                let value: serde_json::Value = serde_json::from_str(&content)?;
+                if value.get("server").is_some() {
+                    serde_json::from_value::<ConfigWrapper>(value)?.server
+                } else {
+                    serde_json::from_value(value)?
+                }
+            }
             _ => anyhow::bail!("Unsupported config format: {}", ext),
+        };
+        config.resolve_relative_paths(
+            path.parent()
+                .context("Configuration has no parent directory")?,
+        );
+        Ok(config)
+    }
+
+    /// Also used for key-generation defaults when no config file exists.
+    pub fn resolve_relative_paths(&mut self, base: &Path) {
+        for path in [
+            Some(&mut self.tls_cert_file),
+            Some(&mut self.tls_key_file),
+            Some(&mut self.identity_key_file),
+            self.decoy_root.as_mut(),
+            self.prekey_bundle_file.as_mut(),
+            Some(&mut self.acme.cache_dir),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *path = resolve_path(path, base);
         }
+    }
+}
+
+/// Native path handling supports ./ and ../ on Windows, Linux, and macOS.
+pub fn resolve_path(path: &Path, base: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
     }
 }
 
@@ -320,4 +361,119 @@ fn default_tun_mtu() -> u16 {
 
 fn default_tun_name() -> String {
     "tun0".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_paths_resolve_beside_root_and_wrapped_toml_and_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("server config 配置");
+        std::fs::create_dir(&directory).unwrap();
+        let identity = rvpn_core::crypto::IdentityKey::generate();
+        identity.save(&directory.join("identity.key")).unwrap();
+        let raw = r#"
+bind_address = "127.0.0.1:19443"
+tls_cert_file = "./certs/cert.pem"
+tls_key_file = "./certs/key.pem"
+identity_key_file = "./identity.key"
+prekey_bundle_file = "./bundle.json"
+decoy_root = "./website"
+[acme]
+cache_dir = "./cache/acme"
+"#;
+        let root: ServerConfig = toml::from_str(raw).unwrap();
+        let wrapped_toml = format!("[server]\n{}", raw.replace("[acme]", "[server.acme]"));
+        let root_json = serde_json::to_string(&root).unwrap();
+        let wrapped_json = serde_json::to_string(&ConfigWrapper { server: root }).unwrap();
+        for (name, contents) in [
+            ("root.toml", raw.to_string()),
+            ("wrapped.toml", wrapped_toml),
+            ("root.json", root_json),
+            ("wrapped.json", wrapped_json),
+        ] {
+            let path = directory.join(name);
+            std::fs::write(&path, contents).unwrap();
+            let config = ServerConfig::load(&path).unwrap();
+            assert_eq!(config.bind_address, "127.0.0.1:19443");
+            assert_eq!(config.tls_cert_file, directory.join("certs/cert.pem"));
+            assert_eq!(config.tls_key_file, directory.join("certs/key.pem"));
+            assert_eq!(
+                config.prekey_bundle_file,
+                Some(directory.join("bundle.json"))
+            );
+            assert_eq!(config.decoy_root, Some(directory.join("website")));
+            assert_eq!(config.acme.cache_dir, directory.join("cache/acme"));
+            let loaded = rvpn_core::crypto::IdentityKey::load(&config.identity_key_file).unwrap();
+            assert_eq!(loaded.verifying_key, identity.verifying_key);
+        }
+    }
+
+    #[test]
+    fn absolute_paths_are_preserved_and_missing_destinations_need_not_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = ServerConfig {
+            tls_cert_file: temp.path().join("cert.pem"),
+            tls_key_file: temp.path().join("key.pem"),
+            identity_key_file: temp.path().join("identity.key"),
+            prekey_bundle_file: Some(temp.path().join("bundle.json")),
+            decoy_root: Some(temp.path().join("site")),
+            acme: AcmeConfig {
+                cache_dir: temp.path().join("cache"),
+                ..AcmeConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+        let path = temp.path().join("server.json");
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let loaded = ServerConfig::load(&path).unwrap();
+        assert_eq!(loaded.tls_cert_file, config.tls_cert_file);
+        assert_eq!(loaded.tls_key_file, config.tls_key_file);
+        assert_eq!(loaded.identity_key_file, config.identity_key_file);
+        assert_eq!(loaded.prekey_bundle_file, config.prekey_bundle_file);
+        assert_eq!(loaded.decoy_root, config.decoy_root);
+        assert_eq!(loaded.acme.cache_dir, config.acme.cache_dir);
+    }
+
+    #[test]
+    fn native_relative_paths_accept_dot_and_parent_components() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable_dir = temp.path().join("bin");
+        std::fs::create_dir(&executable_dir).unwrap();
+        let config = temp.path().join("server.toml");
+        std::fs::write(&config, "").unwrap();
+        assert_eq!(
+            resolve_path(Path::new("./../server.toml"), &executable_dir)
+                .canonicalize()
+                .unwrap(),
+            config.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_path(Path::new("./server.toml"), &executable_dir),
+            executable_dir.join("server.toml")
+        );
+        assert_eq!(resolve_path(&config, &executable_dir), config);
+    }
+
+    #[test]
+    fn invalid_server_section_is_not_silently_replaced_with_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("server.toml");
+        std::fs::write(&path, "[server]\nbind_address = 123\n").unwrap();
+        assert!(ServerConfig::load(&path).is_err());
+    }
+
+    #[test]
+    fn packaged_server_example_loads() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config/server.toml.example");
+        // The .example suffix is for distribution; parsing uses its TOML contents.
+        let contents = std::fs::read_to_string(path).unwrap();
+        let wrapper: ConfigWrapper = toml::from_str(&contents).unwrap();
+        assert_eq!(wrapper.server.websocket_path, "/api/v1/ws");
+        assert!(!wrapper.server.tun.enabled);
+        assert!(!wrapper.server.acme.enabled);
+    }
 }

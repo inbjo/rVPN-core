@@ -16,8 +16,14 @@ nat_enabled = true
 dhcp_range = "10.200.0.0/24"
 
 [server.tun]
-enabled = true
+enabled = false
 tun_ip = "10.200.0.1/24"
 mtu = 1420
 interface_name = "tun0"
 dns_servers = [ "1.1.1.1", "8.8.8.8" ]
+
+[server.acme]
+enabled   = false
+domains   = ["example.com"]
+contacts  = ["mailto:ops@example.com"]
+cache_dir = "/var/lib/rvpn/acme"

@@ -30,7 +30,7 @@ use rvpn_server::handler::{DnsHandler, MultiplexerHandler, TunHandler, VpnHandle
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = parse_args();
+    let mut args = parse_args();
 
     // Setup logging
     let log_level = match args.verbose {
@@ -53,8 +53,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Load configuration
-    let config = load_config(&args.config).await;
+    let executable = std::env::current_exe().context("Failed to locate server executable")?;
+    let executable_dir = executable.parent().context("Executable has no parent directory")?;
+    args.config = rvpn_server::config::resolve_path(&args.config, executable_dir);
+    // Load configuration. Key-generation commands may run without a config.
+    let config = load_config(&args.config, args.command.is_some()).await?;
     let mut config = config;
     if let Some(bind) = args.bind {
         config.bind_address = bind;
@@ -1012,7 +1015,8 @@ fn print_help() {
     println!("Usage: rvpn-server [OPTIONS] [COMMAND]");
     println!();
     println!("Options:");
-    println!("  -c, --config FILE    Configuration file (default: server.toml)");
+    println!("  -c, --config FILE    Configuration file (default: server.toml beside executable)");
+    println!("                       Relative paths resolve beside the executable.");
     println!("  -b, --bind ADDR      Bind address (overrides config)");
     println!("  -v, --verbose        Verbose output (use multiple times for more)");
     println!("  -h, --help           Print this help");
@@ -1044,21 +1048,19 @@ fn print_help() {
     println!("      --from-version 1");
 }
 
-async fn load_config(path: &PathBuf) -> ServerConfig {
+async fn load_config(path: &PathBuf, allow_defaults: bool) -> Result<ServerConfig> {
     if path.exists() {
-        match ServerConfig::load(path) {
-            Ok(config) => {
-                info!("Loaded configuration from {:?}", path);
-                config
-            }
-            Err(e) => {
-                error!("Failed to load config from {:?}: {}", path, e);
-                std::process::exit(1);
-            }
-        }
-    } else {
+        let config = ServerConfig::load(path)
+            .with_context(|| format!("Failed to load server configuration: {}", path.display()))?;
+        info!("Loaded configuration from {:?}", path);
+        Ok(config)
+    } else if allow_defaults {
         info!("No config file found at {:?}. Using defaults.", path);
-        ServerConfig::default()
+        let mut config = ServerConfig::default();
+        config.resolve_relative_paths(path.parent().context("Configuration has no parent directory")?);
+        Ok(config)
+    } else {
+        anyhow::bail!("Server configuration not found: {}", path.display())
     }
 }
 

@@ -61,17 +61,33 @@ jobs:
           cargo --version
 
       - name: Cache Cargo dependencies and build outputs
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rvpn -> target
           key: windows-cli-thin-lto-8
           cache-bin: "false"
 
+      - name: Report cache lookup
+        run: Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'Cargo cache exact hit=${{ steps.rust-cache.outputs.cache-hit }}'
+
       - name: Build Windows CLI client and server
-        run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins
+        run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins --timings
 
       - name: Test configuration and relative paths
-        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests
+        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests --timings
+
+      - name: Test server configuration and relative paths
+        run: cargo test --release --locked --package rvpn-server --lib config::tests --timings
+
+      - name: Upload build timing reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-timings-windows-x86_64
+          path: rvpn/target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Check executable and checksum
         run: |
@@ -148,17 +164,33 @@ jobs:
           cargo --version
 
       - name: Cache Cargo dependencies and build outputs
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rvpn -> target
           key: cli-thin-lto-8-rvpn-${{ matrix.artifact }}
           cache-bin: "false"
 
+      - name: Report cache lookup
+        run: echo 'Cargo cache exact hit=${{ steps.rust-cache.outputs.cache-hit }}' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build CLI client and server
-        run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins
+        run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins --timings
 
       - name: Test configuration and relative paths
-        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests
+        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests --timings
+
+      - name: Test server configuration and relative paths
+        run: cargo test --release --locked --package rvpn-server --lib config::tests --timings
+
+      - name: Upload build timing reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-timings-${{ matrix.artifact }}
+          path: rvpn/target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Check executable and checksum
         run: |

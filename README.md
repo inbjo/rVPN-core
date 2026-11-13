@@ -73,12 +73,16 @@ archives and artifacts include `server.toml.example`. Copy the example to
 `client.toml` or `server.toml` and adjust it before starting. The originals live
 under `config/`, and changes there trigger a new build.
 
-### Client configuration paths
+Each platform also uploads a separate `build-timings-*` Actions artifact with
+Cargo's HTML compilation reports. Cache exact-match status appears in the job
+summary. These diagnostics are separate from release archives.
 
-On Windows, Linux, and macOS, relative `--config` / `-c` paths are resolved
+### Configuration paths
+
+For both client and server on Windows, Linux, and macOS, relative `--config` / `-c` paths are resolved
 from the executable's directory, independently of the terminal's current
 directory. `client.toml` and `./client.toml` both refer to the file beside the
-executable. The default is `client.toml` in that directory. Absolute paths are
+executable. Defaults are `client.toml` and `server.toml` in their respective executable directories. Absolute paths are
 used directly.
 
 Relative paths inside TOML/JSON configurations (identity keys, prekey bundles,
@@ -93,6 +97,27 @@ prekey_bundle = "./prekey-bundle.json"
 
 The `--bundle` CLI override resolves relative to the executable's directory.
 Missing configuration/key errors include the resolved file path.
+
+The server uses the same configuration-directory rule for `tls_cert_file`,
+`tls_key_file`, `identity_key_file`, `prekey_bundle_file`, `decoy_root`, and
+`acme.cache_dir`. Both `[server]` sections and root-level TOML/JSON are supported.
+For example:
+
+```toml
+[server]
+tls_cert_file = "./certs/cert.pem"
+tls_key_file = "./certs/key.pem"
+identity_key_file = "./server_identity.key"
+prekey_bundle_file = "./prekey-bundle.json"
+
+[server.acme]
+enabled = false
+cache_dir = "./acme-cache"
+```
+
+Server `--identity`, `--rotate-from`, and explicit `--output` CLI overrides keep
+their working-directory semantics. `keygen` and `prekey-bundle` can run without
+a configuration; normal startup reports missing or invalid configurations.
 
 ### Client system service
 
