@@ -171,8 +171,13 @@ auto_reload_interval = 3600
 `auto_reload_interval` rereads the files; it does not download new versions.
 For automatic upstream updates, run the same command daily with cron or a
 systemd timer. For example, `0 3 * * * /usr/bin/python3 /opt/rvpn/scripts/update_rule_data.py --output-dir /var/lib/rvpn/rules`.
-Run the updater once before enabling these file paths. If the country IP file
-later becomes unavailable, the client falls back to its compiled-in CIDRs.
+The nightly client archives include the same generated files under `rules/`,
+including source hashes and upstream license notices. Server archives contain
+only the server executable. Extracting a client archive under `/var/lib/rvpn`
+provides the file paths used in the example above.
+Run the updater once or extract a client archive before enabling these file
+paths. If the country IP file later becomes unavailable, the client falls back
+to its compiled-in CIDRs.
 
 ## Usage
 

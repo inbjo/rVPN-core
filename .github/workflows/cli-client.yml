@@ -185,11 +185,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - name: Download all platform artifacts
         uses: actions/download-artifact@v7
         with:
           pattern: rvpn-*
           path: downloads
+
+      - name: Refresh rule data for client archives
+        run: python3 -B scripts/update_rule_data.py --output-dir generated-rules
 
       - name: Package release assets
         shell: bash
@@ -210,11 +215,21 @@ jobs:
             if [[ "$name" == *-windows-* ]]; then
               binary="${binary}.exe"
               (cd "$dir" && sha256sum -c "${binary}.sha256")
-              (cd "$dir" && zip -q -j "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256")
+              if [[ "$name" == rvpn-client-* ]]; then
+                cp -R generated-rules "$dir/rules"
+                (cd "$dir" && zip -q -r "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256" rules)
+              else
+                (cd "$dir" && zip -q -j "${GITHUB_WORKSPACE}/dist/${name}.zip" "$binary" "${binary}.sha256")
+              fi
             else
               (cd "$dir" && sha256sum -c "${binary}.sha256")
               chmod +x "$dir/$binary"
-              tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256"
+              if [[ "$name" == rvpn-client-* ]]; then
+                cp -R generated-rules "$dir/rules"
+                tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256" rules
+              else
+                tar -czf "dist/${name}.tar.gz" -C "$dir" "$binary" "${binary}.sha256"
+              fi
             fi
             count=$((count + 1))
           done
@@ -235,5 +250,5 @@ jobs:
           tag="nightly-${date_utc}-${GITHUB_RUN_ID}"
           gh release create "$tag" dist/* \
             --title "Nightly ${date_utc} (${GITHUB_SHA:0:7})" \
-            --notes "Automated CLI client and server builds for Windows, Linux, and macOS. Client and server are separate archives, each with its own checksum. See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup." \
+            --notes "Automated CLI client and server builds for Windows, Linux, and macOS. Client archives include freshly converted rules, source hashes, and upstream license notices; server archives contain only the server binary. See SHA256SUMS.txt for archive checksums. TUN routing requires platform-specific setup." \
             --prerelease --target "$GITHUB_SHA"

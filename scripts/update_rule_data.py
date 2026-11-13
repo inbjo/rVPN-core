@@ -21,6 +21,11 @@ SOURCES = {
     "china_domains": "https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf",
     "apnic": "https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest",
 }
+LICENSE_SOURCES = {
+    "LICENSE-HostlistsRegistry.txt": "https://raw.githubusercontent.com/AdguardTeam/HostlistsRegistry/main/LICENSE",
+    "LICENSE-AdAway.txt": "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/LICENSE.md",
+    "LICENSE-dnsmasq-china-list.txt": "https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/LICENSE",
+}
 COUNTRIES = ("CN", "HK", "SG", "JP", "KR", "TW")
 DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 ADGUARD_DOMAIN = re.compile(r"\|\|([a-z0-9.-]+)\^\Z")
@@ -172,6 +177,7 @@ def parse_apnic(text: str) -> dict[str, list[str]]:
 
 def update(output_dir: Path) -> dict[str, int]:
     raw = {name: fetch(url) for name, url in SOURCES.items()}
+    licenses = {name: fetch(url) for name, url in LICENSE_SOURCES.items()}
     decoded = {name: data.decode("utf-8") for name, data in raw.items()}
     ad_domains = parse_adguard_dns(decoded["adguard_dns"])
     ad_domains.update(parse_adaway_hosts(decoded["adaway"]))
@@ -189,6 +195,10 @@ def update(output_dir: Path) -> dict[str, int]:
             name: {"url": SOURCES[name], "sha256": hashlib.sha256(data).hexdigest()}
             for name, data in raw.items()
         },
+        "licenses": {
+            name: {"url": LICENSE_SOURCES[name], "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in licenses.items()
+        },
         "counts": {
             "ad_domains": len(ad_domains),
             "china_domains": len(china_domains),
@@ -200,7 +210,15 @@ def update(output_dir: Path) -> dict[str, int]:
         "country-domains-cn.txt": "".join(f"{domain}\n" for domain in sorted(china_domains)),
         "country-ips.json": json.dumps(country_ips, separators=(",", ":")) + "\n",
         "sources.json": json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        "NOTICE.txt": (
+            "Generated rVPN routing data. Source URLs, SHA-256 values, and refresh time "
+            "are recorded in sources.json. AdGuard and AdAway license texts are included "
+            "under their own filenames. The dnsmasq-china-list license is also included. "
+            "APNIC's delegation file states that its country fields record original "
+            "allocation/assignment, not authoritative current IP location.\n"
+        ),
     }
+    files.update({name: data.decode("utf-8") for name, data in licenses.items()})
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".rvpn-rules-", dir=output_dir) as stage:
         staged = Path(stage)
