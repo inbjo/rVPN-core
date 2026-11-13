@@ -38,7 +38,7 @@ jobs:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Show Rust toolchain
         run: |
@@ -70,7 +70,7 @@ jobs:
           "$hash  rvpn-server.exe" | Set-Content target/release/rvpn-server.exe.sha256 -Encoding ascii
 
       - name: Upload Windows CLI
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rvpn-windows-x86_64
           path: |
@@ -107,7 +107,7 @@ jobs:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Show Rust toolchain
         run: |
@@ -139,7 +139,7 @@ jobs:
           fi
 
       - name: Upload CLI
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -159,7 +159,7 @@ jobs:
       contents: write
     steps:
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: rvpn-*
           path: downloads
