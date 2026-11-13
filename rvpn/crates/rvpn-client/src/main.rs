@@ -82,7 +82,7 @@ impl<F: FnMut()> Drop for OnDrop<F> {
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "R-VPN Client - A stealth VPN with Double Ratchet encryption")]
 struct Args {
-    /// Configuration file
+    /// Configuration file (relative paths are resolved beside the executable)
     #[arg(short, long, default_value = "client.toml")]
     config: PathBuf,
 
@@ -90,7 +90,7 @@ struct Args {
     #[arg(long)]
     server: Option<String>,
 
-    /// Path to server prekey bundle JSON file
+    /// Server prekey bundle JSON (relative paths are resolved beside the executable)
     #[arg(long)]
     bundle: Option<PathBuf>,
 
@@ -146,7 +146,15 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    // Relative CLI input paths are anchored to the executable, independently
+    // of the shell or service manager's working directory on all platforms.
+    let executable = std::env::current_exe().context("Failed to locate client executable")?;
+    let executable_dir = executable.parent().context("Executable has no parent directory")?;
+    args.config = config::resolve_path(&args.config, executable_dir);
+    if let Some(bundle) = &mut args.bundle {
+        *bundle = config::resolve_path(bundle, executable_dir);
+    }
     if let Some(Commands::Service { action }) = &args.command {
         anyhow::ensure!(
             args.server.is_none()
@@ -185,6 +193,8 @@ async fn async_main(args: Args) -> Result<()> {
     let config = if args.config.exists() {
         info!("Loading configuration from {:?}", args.config);
         ClientConfig::load(&args.config)?
+    } else if args.command.is_none() {
+        anyhow::bail!("Client configuration not found: {}", args.config.display());
     } else {
         info!("No config file found, using defaults");
         ClientConfig::default()

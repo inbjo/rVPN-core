@@ -63,11 +63,12 @@ pub struct Socks5Proxy {
 impl Socks5Proxy {
     pub async fn new(listen_addr: SocketAddr, config: &ClientConfig) -> Result<Self> {
         let key_path = config.identity_key_file.clone();
+        let key_context = format!("Failed to load identity key: {}", key_path.display());
         let identity_key = Arc::new(
             tokio::task::spawn_blocking(move || IdentityKey::load(&key_path))
                 .await
                 .context("Identity key load task failed")?
-                .context("Failed to load identity key")?,
+                .context(key_context)?,
         );
 
         // Build the multi-server pool (the default server + any [[server]]

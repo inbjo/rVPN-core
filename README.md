@@ -68,6 +68,27 @@ Publishing a GitHub Release builds its tagged commit and uploads the matching
 platform archives and checksums to that release. Rerunning the workflow replaces
 same-name assets without creating another release or version tag.
 
+### Client configuration paths
+
+On Windows, Linux, and macOS, relative `--config` / `-c` paths are resolved
+from the executable's directory, independently of the terminal's current
+directory. `client.toml` and `./client.toml` both refer to the file beside the
+executable. The default is `client.toml` in that directory. Absolute paths are
+used directly.
+
+Relative paths inside TOML/JSON configurations (identity keys, prekey bundles,
+extra-server bundles, routing rules, known hosts, and an explicitly relative
+`data_dir`) are resolved from the configuration file's directory. Both
+`identity.key` and `./identity.key` work. For example:
+
+```toml
+identity_key_file = "./identity.key"
+prekey_bundle = "./prekey-bundle.json"
+```
+
+The `--bundle` CLI override resolves relative to the executable's directory.
+Missing configuration/key errors include the resolved file path.
+
 ### Client system service
 
 The CLI supports systemd on Linux, Windows Service Control Manager, and a
@@ -88,7 +109,7 @@ Installation enables startup at boot; use `service start` to start immediately.
 Linux requires systemd. Service names are `rvpn-client` (Linux/Windows) and
 `com.rvpn.client` (macOS). Installation does not copy the executable, config,
 or keys: keep them at their installed paths. Relative paths in the configuration
-are resolved from the directory in which `service install` was run.
+are resolved from the configuration file's directory for all three platforms.
 Put runtime settings in the configuration file; service installation rejects CLI
 overrides. Services run as root/LocalSystem, so set an explicit writable `data_dir`
 and ensure the service account can read the identity key and prekey bundle.

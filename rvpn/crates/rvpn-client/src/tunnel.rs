@@ -93,7 +93,7 @@ impl VpnTunnel {
 
         // Load identity key
         let identity_key = Arc::new(IdentityKey::load(identity_key_file)
-            .map_err(|e| anyhow::anyhow!("Failed to load identity key: {}", e))?);
+            .map_err(|e| anyhow::anyhow!("Failed to load identity key {}: {}", identity_key_file.display(), e))?);
         debug!("Loaded client identity key");
 
         // Load server prekey bundle

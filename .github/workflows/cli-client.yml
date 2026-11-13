@@ -68,6 +68,9 @@ jobs:
       - name: Build Windows CLI client and server
         run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins
 
+      - name: Test configuration and relative paths
+        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests
+
       - name: Check executable and checksum
         run: |
           $exe = 'target/release/rvpn.exe'
@@ -144,6 +147,9 @@ jobs:
 
       - name: Build CLI client and server
         run: cargo build --release --locked --package rvpn-client --package rvpn-server --bins
+
+      - name: Test configuration and relative paths
+        run: cargo test --release --locked --package rvpn-client --bin rvpn config::tests
 
       - name: Check executable and checksum
         run: |
