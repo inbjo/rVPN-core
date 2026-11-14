@@ -168,12 +168,16 @@ fn prepare_logging(config: &LoggingConfig, verbose: u8, prefix: &str) -> Result<
     // Use a subscriber-wide LevelFilter layer. Replacing `Filtered` would
     // require a new registry FilterId, which reload::Handle cannot register.
     let dependency_filter = tracing_subscriber::filter::filter_fn(|metadata| {
-        metadata.target().starts_with("rvpn_") || *metadata.level() <= Level::WARN
+        let target = metadata.target();
+        // The CLI binary is named `rvpn`; library crates use `rvpn_*`.
+        target == "rvpn"
+            || target.starts_with("rvpn::")
+            || target.starts_with("rvpn_")
+            || *metadata.level() <= Level::WARN
     });
     // Client file logging replaces console output; the browser URL is printed
     // separately even when logs are disabled or the level is set to off.
-    let console = (!config.file_enabled).then(console_layer);
-    let mut file_layer: Option<DynamicLayer> = None;
+    let mut output: DynamicLayer = console_layer().boxed();
     let mut guard = None;
     if config.file_enabled {
         let executable = std::env::current_exe()?;
@@ -195,24 +199,18 @@ fn prepare_logging(config: &LoggingConfig, verbose: u8, prefix: &str) -> Result<
             .lossy(false)
             .finish(appender);
         guard = Some(worker);
-        file_layer = Some(
-            tracing_subscriber::fmt::layer()
-                .with_writer(writer)
-                .with_ansi(false)
-                .with_target(false)
-                .with_file(true)
-                .with_line_number(true)
-                .boxed(),
-        );
+        output = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false)
+            .with_file(true)
+            .with_line_number(true)
+            .boxed();
     }
     Ok(PreparedLogging {
         // Compose sequentially so a filter's `Interest::never()` cannot be
         // overridden by a formatter's `Interest::always()` in a Vec of layers.
-        layer: filter
-            .and_then(dependency_filter)
-            .and_then(console)
-            .and_then(file_layer)
-            .boxed(),
+        layer: filter.and_then(dependency_filter).and_then(output).boxed(),
         guard,
     })
 }
@@ -278,6 +276,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reload_switches_between_console_and_file_without_disabling_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = LoggingConfig {
+            file_enabled: false,
+            directory: Some(directory.path().into()),
+            ..Default::default()
+        };
+        let prepared = prepare_logging(&config, 0, "rvpn-client").unwrap();
+        let (layer, handle) = tracing_subscriber::reload::Layer::new(prepared.layer);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let controller = ReloadableLogging {
+            handle,
+            guard: std::sync::Mutex::new(prepared.guard),
+            verbose: 0,
+            prefix: "rvpn-client".into(),
+        };
+        let check_enabled = || {
+            assert!(tracing::enabled!(target: "rvpn", Level::ERROR));
+            assert!(tracing::enabled!(target: "rvpn::runtime_control", Level::INFO));
+            assert!(tracing::enabled!(target: "rvpn_client", Level::INFO));
+            assert!(tracing::enabled!(target: "h2", Level::WARN));
+            assert!(!tracing::enabled!(target: "rvpn", Level::DEBUG));
+            assert!(!tracing::enabled!(target: "h2", Level::INFO));
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            check_enabled();
+            config.file_enabled = true;
+            controller
+                .apply(controller.prepare(&config).unwrap())
+                .unwrap();
+            check_enabled();
+            info!(target: "rvpn", "file output after console");
+            config.file_enabled = false;
+            controller
+                .apply(controller.prepare(&config).unwrap())
+                .unwrap();
+            check_enabled();
+        });
+        drop(controller);
+        assert!(read_logs(directory.path()).contains("file output after console"));
+    }
+
+    #[test]
     fn reload_respects_filters_at_reused_callsites() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = LoggingConfig {
@@ -297,6 +338,8 @@ mod tests {
             tracing::debug!("application debug");
             info!("application info");
             tracing::warn!("application warning");
+            tracing::debug!(target: "rvpn", "binary debug");
+            tracing::info!(target: "rvpn::runtime_control", "binary module info");
             tracing::debug!(target: "h2", "dependency debug");
             tracing::info!(target: "h2", "dependency info");
             tracing::warn!(target: "h2", "dependency warning");
@@ -328,6 +371,16 @@ mod tests {
             assert_eq!(
                 logs.contains("application warning"),
                 level != "off",
+                "{level}"
+            );
+            assert_eq!(
+                logs.contains("binary debug"),
+                matches!(level, "debug" | "trace"),
+                "{level}"
+            );
+            assert_eq!(
+                logs.contains("binary module info"),
+                !matches!(level, "warn" | "off"),
                 "{level}"
             );
             assert_eq!(

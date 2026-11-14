@@ -148,6 +148,24 @@ async fn file_logging_keeps_only_panel_access_information_on_console() {
     config["logging"]["max_files"] = json!(3);
     assert_eq!(save(&mut socket, &mut current, config).await["ok"], true);
     assert!(TcpStream::connect(socks).await.is_ok());
+    // The file writer is asynchronous. Wait for the event to reach disk before
+    // killing the process, which cannot flush its WorkerGuard on forced exit.
+    let logs = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let logs: String = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+                .map(|path| String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned())
+                .collect();
+            if logs.contains("Client configuration applied") {
+                break logs;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("configuration applied log was not written within 10 seconds");
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     let mut stdout = String::new();
@@ -170,12 +188,6 @@ async fn file_logging_keeps_only_panel_access_information_on_console() {
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains(&format!("http://{panel}/")), "{stdout}");
     assert!(stderr.is_empty(), "{stderr}");
-    let logs: String = std::fs::read_dir(directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
-        .map(|path| std::fs::read_to_string(path).unwrap())
-        .collect();
     assert!(logs.contains("Client configuration applied"));
     assert!(!logs.contains('\u{1b}'));
 }
