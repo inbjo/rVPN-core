@@ -170,12 +170,10 @@ fn prepare_logging(config: &LoggingConfig, verbose: u8, prefix: &str) -> Result<
     let dependency_filter = tracing_subscriber::filter::filter_fn(|metadata| {
         metadata.target().starts_with("rvpn_") || *metadata.level() <= Level::WARN
     });
-    let mut layers: Vec<DynamicLayer> = vec![filter.boxed(), dependency_filter.boxed()];
     // Client file logging replaces console output; the browser URL is printed
     // separately even when logs are disabled or the level is set to off.
-    if !config.file_enabled {
-        layers.push(console_layer().boxed());
-    }
+    let console = (!config.file_enabled).then(console_layer);
+    let mut file_layer: Option<DynamicLayer> = None;
     let mut guard = None;
     if config.file_enabled {
         let executable = std::env::current_exe()?;
@@ -197,7 +195,7 @@ fn prepare_logging(config: &LoggingConfig, verbose: u8, prefix: &str) -> Result<
             .lossy(false)
             .finish(appender);
         guard = Some(worker);
-        layers.push(
+        file_layer = Some(
             tracing_subscriber::fmt::layer()
                 .with_writer(writer)
                 .with_ansi(false)
@@ -208,7 +206,13 @@ fn prepare_logging(config: &LoggingConfig, verbose: u8, prefix: &str) -> Result<
         );
     }
     Ok(PreparedLogging {
-        layer: layers.boxed(),
+        // Compose sequentially so a filter's `Interest::never()` cannot be
+        // overridden by a formatter's `Interest::always()` in a Vec of layers.
+        layer: filter
+            .and_then(dependency_filter)
+            .and_then(console)
+            .and_then(file_layer)
+            .boxed(),
         guard,
     })
 }
@@ -272,6 +276,69 @@ pub fn init_reloadable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_respects_filters_at_reused_callsites() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = LoggingConfig {
+            directory: Some(directory.path().join("initial")),
+            ..Default::default()
+        };
+        let prepared = prepare_logging(&config, 0, "rvpn-client").unwrap();
+        let (layer, handle) = tracing_subscriber::reload::Layer::new(prepared.layer);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let controller = ReloadableLogging {
+            handle,
+            guard: std::sync::Mutex::new(prepared.guard),
+            verbose: 0,
+            prefix: "rvpn-client".into(),
+        };
+        let emit = || {
+            tracing::debug!("application debug");
+            info!("application info");
+            tracing::warn!("application warning");
+            tracing::debug!(target: "h2", "dependency debug");
+            tracing::info!(target: "h2", "dependency info");
+            tracing::warn!(target: "h2", "dependency warning");
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            emit();
+            for level in ["debug", "warn", "off", "trace", "info"] {
+                config.level = level.into();
+                config.directory = Some(directory.path().join(level));
+                controller
+                    .apply(controller.prepare(&config).unwrap())
+                    .unwrap();
+                emit();
+            }
+        });
+        drop(controller);
+        for level in ["initial", "debug", "warn", "off", "trace", "info"] {
+            let logs = read_logs(&directory.path().join(level));
+            assert_eq!(
+                logs.contains("application debug"),
+                matches!(level, "debug" | "trace"),
+                "{level}"
+            );
+            assert_eq!(
+                logs.contains("application info"),
+                !matches!(level, "warn" | "off"),
+                "{level}"
+            );
+            assert_eq!(
+                logs.contains("application warning"),
+                level != "off",
+                "{level}"
+            );
+            assert_eq!(
+                logs.contains("dependency warning"),
+                level != "off",
+                "{level}"
+            );
+            assert!(!logs.contains("dependency debug"), "{level}");
+            assert!(!logs.contains("dependency info"), "{level}");
+        }
+    }
 
     #[test]
     fn reload_changes_level_and_destination_and_rejects_invalid_destination() {
