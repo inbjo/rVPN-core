@@ -186,9 +186,15 @@ impl Socks5Proxy {
     pub fn pool(&self) -> Arc<ServerPool> { Arc::clone(&self.pool) }
     pub fn router(&self) -> Arc<Router> { Arc::clone(&self.router) }
 
+    #[allow(dead_code)] // Library entry point; the CLI supplies a bound listener.
     pub async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(self.listen_addr).await
             .with_context(|| format!("Failed to bind SOCKS5 proxy to {}", self.listen_addr))?;
+
+        self.run_with_listener(listener).await
+    }
+
+    pub(crate) async fn run_with_listener(&self, listener: TcpListener) -> Result<()> {
 
         info!("SOCKS5 proxy listening on {}", self.listen_addr);
 

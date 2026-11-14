@@ -539,14 +539,13 @@ fn format_micros(micros: u64) -> String {
 }
 
 /// Global stats manager instance
-use std::sync::OnceLock;
-static GLOBAL_STATS_MANAGER: OnceLock<Arc<StatsManager>> = OnceLock::new();
+static GLOBAL_STATS_MANAGER: std::sync::RwLock<Option<Arc<StatsManager>>> = std::sync::RwLock::new(None);
 
 /// Initialize the global stats manager
 #[allow(dead_code)]
 pub async fn init_global_stats_manager() -> Arc<StatsManager> {
     let manager = Arc::new(StatsManager::new().await);
-    GLOBAL_STATS_MANAGER.set(manager.clone()).ok();
+    *GLOBAL_STATS_MANAGER.write().unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
     manager
 }
 
@@ -557,14 +556,14 @@ pub async fn init_global_stats_manager_with_dir(data_dir: PathBuf) -> Arc<StatsM
         true,
         Some(data_dir)
     ).await);
-    GLOBAL_STATS_MANAGER.set(manager.clone()).ok();
+    *GLOBAL_STATS_MANAGER.write().unwrap_or_else(|e| e.into_inner()) = Some(manager.clone());
     manager
 }
 
 /// Get the global stats manager
 #[allow(dead_code)]
 pub fn global_stats_manager() -> Option<Arc<StatsManager>> {
-    GLOBAL_STATS_MANAGER.get().cloned()
+    GLOBAL_STATS_MANAGER.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Start stats collection with the global manager

@@ -16,7 +16,7 @@ This repository contains the core Rust implementation: the client, server, proto
 - **Reverse proxy** - the server hosts a real website on port 443, the VPN endpoint is hidden behind it
 - **Per-instance decoy pages** - plain HTTPS probes get a realistic, randomly chosen login page, so no two servers present the same face
 - **TLS fingerprint mimicry** - connections mimic Chrome, Firefox, or Safari fingerprints
-- **Stats dashboard** - the CLI serves a live MRTG-style traffic page with a JSON API
+- **Web control panel** - embedded React UI with live WebSocket statistics and complete client configuration editing
 
 ## Repository Structure
 
@@ -87,6 +87,70 @@ cd rvpn
 cargo test --profile ci-test --locked -p rvpn-client --bin rvpn config::tests
 cargo test --profile ci-test --locked -p rvpn-server --lib config::tests
 ```
+
+### Embedded client control panel
+
+Enable the panel and open `http://127.0.0.1:9800`:
+
+```toml
+[dashboard]
+enabled = true
+listen_address = "127.0.0.1:9800"
+```
+
+The client prints the browser URL after the listener starts, including the actual
+port. Wildcard listeners print a loopback URL plus LAN access instructions. When
+the panel is disabled, startup logs explain how to enable it.
+
+The React + Tailwind CSS interface follows `DESIGN.md` and is built with Vite 8.
+The HTML, JavaScript, CSS and fonts are embedded into `rvpn`; deployment needs
+only the binary. No Node installation or CDN is needed at runtime.
+WebSocket `/ws` pushes statistics every two seconds and handles configuration
+reads, validation and saves. All existing fields have forms, including extra
+servers and per-server routing. The old `/api/stats.json` endpoint remains.
+
+Saving validates the settings and atomically replaces the same TOML or JSON
+file passed to `-c`. Relative paths stay relative. Formatting and comments are
+normalized when saving; unknown fields are retained. A revision check prevents
+overwriting edits made by another page or program. **Save and apply** updates
+the running client without restarting its process or system service. Log level,
+log files and panel settings update independently, preserving VPN connections.
+Other settings replace the network runtime, releasing old listeners and tasks;
+existing proxy connections may disconnect and must reconnect. The worker-thread
+count, DNS resolver/cache, routing, keys, data directory, proxy ports and TUN mode
+are rebuilt from the new configuration. If startup or binding fails, the client
+restores the old network configuration and configuration file and reports the
+error. The overview shows the active configuration, rather than unconfirmed edits.
+CLI overrides still take precedence, including when applying saved settings.
+
+Changing the panel address binds the new listener and the page switches to that
+address after receiving the save acknowledgement. Disabling the panel closes its
+listener and WebSocket sessions; proxying continues. CIDR changes apply to new
+and existing sessions. If VPN startup fails, an enabled panel stays available to
+fix the settings; saving a corrected configuration starts the network again.
+Externally edited files are shown as pending until saved/applied through the UI.
+
+The existing `allow_cidrs` defaults to localhost. Allowed clients can read and
+change all settings, including proxy credentials, so only allow trusted devices.
+The listener verifies Host and WebSocket Origin, bounds message sizes and does
+not enable CORS. Access the configured IP or `localhost`; arbitrary hostnames
+and reverse-proxy origins are deliberately rejected.
+
+Frontend development (Node 24 recommended):
+
+```bash
+cd rvpn/webui
+npm ci
+npm test
+npm run build
+npm run dev
+```
+
+The dev server proxies `/ws` to the client on port 9800. `npm run build` generates
+`rvpn/crates/rvpn-client/ui-dist/index.html`; rebuild before compiling Rust after
+UI edits. The generated asset is included for offline Cargo builds. CI builds
+and tests the frontend once, then embeds that same artifact in every platform
+binary. Browser tests use `npx playwright install chromium` and `npm run test:e2e`.
 
 ### Configuration paths
 
@@ -184,6 +248,32 @@ overrides. Services run as root/LocalSystem, so set an explicit writable `data_d
 and ensure the service account can read the identity key and prekey bundle.
 Unix logs are available through `journalctl -u rvpn-client` (Linux) or
 `/var/log/rvpn-client.log` (macOS).
+
+### Client and server file logs
+
+Both CLI programs write to the console and daily log files by default, including
+startup errors. Files are stored beside the executable on Windows, Linux, and
+macOS, including when running as a service: `rvpn-client.YYYY-MM-DD.log` for the client
+and `rvpn-server.YYYY-MM-DD.log` for the server. Dates use UTC, restarts append,
+and up to seven matching log files are retained. Normal shutdown flushes queued
+messages. The executable directory must be writable; if file creation fails, a
+console warning explains the error and the program continues with console logs.
+
+Configure the client with `[logging]`. For the server example's `[server]`
+format, use `[server.logging]` (root-level server configs use `[logging]`):
+
+```toml
+[logging]
+file_enabled = true
+level = "info"       # off/error/warn/info/debug/trace; -v/-vv overrides
+max_files = 7        # positive number of daily log files to retain
+# directory = "./logs"
+```
+
+Omit `directory` to use the executable directory. An explicit relative directory
+is resolved beside the configuration file, including `./` and `../`; absolute
+directories are supported. Missing directories are created automatically.
+Set `file_enabled = false` to keep console logging only.
 
 ### Client TLS trust
 

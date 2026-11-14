@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 rvpn-core = { path = "../rvpn-core" }
+rvpn-logging = { path = "../rvpn-logging" }
 
 # Async
 tokio.workspace = true

@@ -16,6 +16,9 @@ struct ConfigWrapper {
 /// Main server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Console and file logging settings.
+    #[serde(default)]
+    pub logging: rvpn_logging::LoggingConfig,
     /// Bind address
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
@@ -81,6 +84,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            logging: rvpn_logging::LoggingConfig::default(),
             bind_address: "0.0.0.0:443".to_string(),
             tls_cert_file: PathBuf::from("certs/cert.pem"),
             tls_key_file: PathBuf::from("certs/key.pem"),
@@ -195,6 +199,7 @@ impl ServerConfig {
 
     /// Also used for key-generation defaults when no config file exists.
     pub fn resolve_relative_paths(&mut self, base: &Path) {
+        self.logging.resolve_directory(base);
         for path in [
             Some(&mut self.tls_cert_file),
             Some(&mut self.tls_key_file),
@@ -383,9 +388,13 @@ prekey_bundle_file = "./bundle.json"
 decoy_root = "./website"
 [acme]
 cache_dir = "./cache/acme"
+[logging]
+directory = "./logs"
+level = "warn"
+max_files = 4
 "#;
         let root: ServerConfig = toml::from_str(raw).unwrap();
-        let wrapped_toml = format!("[server]\n{}", raw.replace("[acme]", "[server.acme]"));
+        let wrapped_toml = format!("[server]\n{}", raw.replace("[acme]", "[server.acme]").replace("[logging]", "[server.logging]"));
         let root_json = serde_json::to_string(&root).unwrap();
         let wrapped_json = serde_json::to_string(&ConfigWrapper { server: root }).unwrap();
         for (name, contents) in [
@@ -397,6 +406,9 @@ cache_dir = "./cache/acme"
             let path = directory.join(name);
             std::fs::write(&path, contents).unwrap();
             let config = ServerConfig::load(&path).unwrap();
+            assert_eq!(config.logging.directory, Some(directory.join("./logs")));
+            assert_eq!(config.logging.level, "warn");
+            assert_eq!(config.logging.max_files, 4);
             assert_eq!(config.bind_address, "127.0.0.1:19443");
             assert_eq!(config.tls_cert_file, directory.join("certs/cert.pem"));
             assert_eq!(config.tls_key_file, directory.join("certs/key.pem"));

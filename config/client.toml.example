@@ -32,3 +32,16 @@ dns_cache_enabled = true
 [server_identity]
 trust_on_first_use = true
 strict = true
+
+# 文件日志默认写在 rvpn 可执行文件旁，按 UTC 日期分文件。
+[logging]
+file_enabled = true
+level = "info"                 # off/error/warn/info/debug/trace；-v/-vv 可覆盖
+max_files = 7                  # 最多保留 7 份日志
+# directory = "./logs"         # 可选：相对于配置文件目录，支持绝对路径
+
+# 内嵌 Web 控制面板：实时统计、完整配置编辑，保存后自动应用，无需重启进程。
+[dashboard]
+enabled = true
+listen_address = "127.0.0.1:9800"
+allow_cidrs = ["127.0.0.0/8", "::1/128"]

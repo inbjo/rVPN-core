@@ -118,12 +118,16 @@ impl DnsProxy {
     }
 
     /// Start the DNS proxy (runs indefinitely, returns only on fatal error)
+    #[allow(dead_code)] // Standalone entry point; the supervisor supplies a bound socket.
     pub async fn run(self: Arc<Self>) -> Result<()> {
-        let socket = Arc::new(
-            UdpSocket::bind(self.listen_addr)
+        let socket = UdpSocket::bind(self.listen_addr)
                 .await
-                .with_context(|| format!("Failed to bind DNS proxy to {}", self.listen_addr))?,
-        );
+                .with_context(|| format!("Failed to bind DNS proxy to {}", self.listen_addr))?;
+        self.run_with_socket(socket).await
+    }
+
+    pub(crate) async fn run_with_socket(self: Arc<Self>, socket: UdpSocket) -> Result<()> {
+        let socket = Arc::new(socket);
 
         info!("DNS proxy listening on {}", self.listen_addr);
 

@@ -22,8 +22,7 @@ use anyhow::{Context as _, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{debug, error, info, warn};
 
 use rvpn_server::decoy::{parse_request_head, DecoyServer, RequestHead, RewindStream};
 use rvpn_server::handler::{DnsHandler, MultiplexerHandler, TunHandler, VpnHandler};
@@ -31,22 +30,6 @@ use rvpn_server::handler::{DnsHandler, MultiplexerHandler, TunHandler, VpnHandle
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = parse_args();
-
-    // Setup logging
-    let log_level = match args.verbose {
-        0 => Level::INFO,
-        1 => Level::DEBUG,
-        _ => Level::TRACE,
-    };
-
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(false)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)?;
-
-    info!("R-VPN Server v{}", env!("CARGO_PKG_VERSION"));
 
     if args.help {
         print_help();
@@ -57,31 +40,45 @@ async fn main() -> Result<()> {
     let executable_dir = executable.parent().context("Executable has no parent directory")?;
     args.config = rvpn_server::config::resolve_path(&args.config, executable_dir);
     // Load configuration. Key-generation commands may run without a config.
-    let config = load_config(&args.config, args.command.is_some()).await?;
-    let mut config = config;
-    if let Some(bind) = args.bind {
-        config.bind_address = bind;
-    }
-
-    // Handle commands
-    if let Some(cmd) = args.command {
-        match cmd.as_str() {
-            "keygen" => return keygen(&config, args.output),
-            "prekey-bundle" => {
-                return prekey_bundle(
-                    &config,
-                    args.identity,
-                    args.output,
-                    args.rotate_from,
-                    args.from_version,
-                )
-            }
-            _ => {}
+    let loaded = load_config(&args.config, args.command.is_some()).await;
+    let settings = loaded.as_ref().map(|config| config.logging.clone()).unwrap_or_default();
+    let _log_guard = rvpn_logging::init(&settings, args.verbose, "rvpn-server")?;
+    info!("R-VPN Server v{}", env!("CARGO_PKG_VERSION"));
+    let result = async {
+        let mut config = loaded?;
+        info!("Loaded configuration from {:?}", args.config);
+        if let Some(bind) = args.bind {
+            config.bind_address = bind;
         }
-    }
 
-    rvpn_server::key_init::initialize(&mut config, args.config.parent().context("Configuration has no parent directory")?)?;
-    run_server(config).await
+        // Handle commands
+        if let Some(cmd) = args.command {
+            match cmd.as_str() {
+                "keygen" => return keygen(&config, args.output),
+                "prekey-bundle" => {
+                    return prekey_bundle(
+                        &config,
+                        args.identity,
+                        args.output,
+                        args.rotate_from,
+                        args.from_version,
+                    )
+                }
+                _ => {}
+            }
+        }
+
+        rvpn_server::key_init::initialize(
+            &mut config,
+            args.config.parent().context("Configuration has no parent directory")?,
+        )?;
+        run_server(config).await
+    }
+    .await;
+    if let Err(error) = &result {
+        error!("Server terminated: {error:#}");
+    }
+    result
 }
 
 /// Run the VPN server
@@ -1053,10 +1050,8 @@ async fn load_config(path: &PathBuf, allow_defaults: bool) -> Result<ServerConfi
     if path.exists() {
         let config = ServerConfig::load(path)
             .with_context(|| format!("Failed to load server configuration: {}", path.display()))?;
-        info!("Loaded configuration from {:?}", path);
         Ok(config)
     } else if allow_defaults {
-        info!("No config file found at {:?}. Using defaults.", path);
         let mut config = ServerConfig::default();
         config.resolve_relative_paths(path.parent().context("Configuration has no parent directory")?);
         Ok(config)

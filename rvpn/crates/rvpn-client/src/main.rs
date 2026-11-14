@@ -11,6 +11,7 @@
 //! R-VPN Client Implementation - Brook-style simplified architecture
 
 mod config;
+mod control_panel;
 mod dashboard;
 mod dns;
 mod dns_cache;
@@ -20,6 +21,7 @@ mod identity_verification;
 mod metrics;
 mod proxy_common;
 mod router;
+mod runtime_control;
 mod server_pool;
 mod service;
 mod socks5;
@@ -55,8 +57,7 @@ use std::process::id as process_id;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
-use tracing::{error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, warn};
 
 use config::ClientConfig;
 use socks5::Socks5Proxy;
@@ -98,7 +99,7 @@ struct Args {
     #[arg(long)]
     fingerprint: Option<String>,
 
-    /// Enable the stats dashboard and set its HTTP listen address (e.g. 127.0.0.1:9800)
+    /// Enable the web control panel and set its listen address (e.g. 127.0.0.1:9800)
     #[arg(long)]
     dashboard_listen: Option<String>,
 
@@ -170,53 +171,52 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(args: Args) -> Result<()> {
-    // Setup logging
-    let log_level = match args.verbose {
-        0 => Level::INFO,
-        1 => Level::DEBUG,
-        _ => Level::TRACE,
+    let loaded = if args.config.exists() {
+        ClientConfig::load(&args.config)
+    } else if args.command.is_none() {
+        Err(anyhow::anyhow!("Client configuration not found: {}", args.config.display()))
+    } else {
+        Ok(ClientConfig::default())
     };
+    let settings = loaded.as_ref().map(|config| config.logging.clone()).unwrap_or_default();
+    // Keep the log writer alive until shutdown, including failed startup, so pending
+    // file messages are flushed in foreground and system-service mode alike.
+    let logging = std::sync::Arc::new(rvpn_logging::init_reloadable(
+        &settings, args.verbose, "rvpn-client",
+    )?);
+    let result = match loaded {
+        Ok(config) => run_client(args, config, logging.clone()).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = &result {
+        error!("Client terminated: {error:#}");
+    }
+    result
+}
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(true)
-        .with_line_number(true)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
-
+async fn run_client(
+    args: Args,
+    config: ClientConfig,
+    logging: std::sync::Arc<rvpn_logging::ReloadableLogging>,
+) -> Result<()> {
     info!("R-VPN Client v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
-    let config = if args.config.exists() {
+    if args.config.exists() {
         info!("Loading configuration from {:?}", args.config);
-        ClientConfig::load(&args.config)?
-    } else if args.command.is_none() {
-        anyhow::bail!("Client configuration not found: {}", args.config.display());
     } else {
         info!("No config file found, using defaults");
-        ClientConfig::default()
-    };
+    }
 
     // Override with CLI arguments
+    let overrides = runtime_control::Overrides {
+        server: args.server.clone(),
+        bundle: args.bundle.clone(),
+        fingerprint: args.fingerprint.clone(),
+        dashboard_listen: args.dashboard_listen.clone(),
+    };
     let mut config = config;
-    if let Some(server) = args.server {
-        config.server_address = server;
-    }
-    if let Some(bundle) = args.bundle {
-        config.prekey_bundle = Some(bundle);
-    }
-    if let Some(fingerprint) = args.fingerprint {
-        if let Some(fp) = rvpn_tls::fingerprint_from_str(&fingerprint) {
-            config.tls_fingerprint = fp;
-        }
-    }
-    if let Some(dashboard_listen) = args.dashboard_listen {
-        config.dashboard.listen_address = dashboard_listen;
-        config.dashboard.enabled = true;
-    }
+    overrides.apply(&mut config);
 
     // Handle subcommands
     match args.command {
@@ -232,104 +232,11 @@ async fn async_main(args: Args) -> Result<()> {
         _ => {}
     }
 
-    rvpn_core::crypto::key_files::ensure_identity(&config.identity_key_file, "Client")?;
-    websocket::configure_endpoint_dns(&config)?;
-
-    // Run in appropriate mode based on config
-    if config.tun.enabled {
-        // Run in TUN mode (full VPN)
-        run_tun(config).await
-    } else {
-        // Run SOCKS5 proxy (Brook-style: each connection manages its own WebSocket)
-        run_socks5(config).await
-    }
-}
-
-/// Start the stats dashboard (global state + sampler + HTTP listener) when
-/// enabled in the config. The state is created once and stored in the global
-/// handle so the `dashboard::record_*` hook points find it. `shutdown` is
-/// available in TUN mode; SOCKS5 mode runs the dashboard until process exit.
-async fn start_dashboard(
-    config: &ClientConfig,
-    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
-) {
-    if !config.dashboard.enabled {
-        return;
-    }
-
-    let state = match dashboard::global() {
-        Some(s) => s,
-        None => {
-            let s = std::sync::Arc::new(dashboard::DashboardState::new());
-            dashboard::init(std::sync::Arc::clone(&s));
-            s
-        }
-    };
-
-    let listener = match tokio::net::TcpListener::bind(&config.dashboard.listen_address).await {
-        Ok(l) => l,
-        Err(e) => {
-            warn!(
-                "Failed to bind dashboard listener on {}: {}",
-                config.dashboard.listen_address, e
-            );
-            return;
-        }
-    };
-
-    // Parse the access allowlist; invalid entries are dropped with a warning.
-    let allow: Vec<ip_network::IpNetwork> = config
-        .dashboard
-        .allow_cidrs
-        .iter()
-        .filter_map(|c| match c.parse() {
-            Ok(net) => Some(net),
-            Err(e) => {
-                warn!("Dashboard: ignoring invalid allow_cidrs entry {:?}: {}", c, e);
-                None
-            }
-        })
-        .collect();
-    if allow.is_empty() {
-        warn!("Dashboard: allow_cidrs is empty after parsing — not starting (would 403 everything)");
-        return;
-    }
-    if !config.dashboard.listen_address.starts_with("127.")
-        && !config.dashboard.listen_address.starts_with("[::1]")
-        && config.dashboard.allow_cidrs.iter().all(|c| {
-            c.starts_with("127.") || c.starts_with("::1")
-        })
-    {
-        warn!(
-            "Dashboard: listening on {} but allow_cidrs only covers localhost — \
-             remote clients will get 403",
-            config.dashboard.listen_address
-        );
-    }
-    info!(
-        "Dashboard: http://{}/ (allow: {})",
-        config.dashboard.listen_address,
-        config.dashboard.allow_cidrs.join(", ")
-    );
-    let allow = std::sync::Arc::new(allow);
-
-    match shutdown {
-        Some(rx) => {
-            tokio::spawn(dashboard::run_sampler_until(
-                std::sync::Arc::clone(&state),
-                rx.clone(),
-            ));
-            tokio::spawn(dashboard::serve_until(listener, state, allow, rx));
-        }
-        None => {
-            tokio::spawn(dashboard::run_sampler(std::sync::Arc::clone(&state)));
-            tokio::spawn(dashboard::serve(listener, state, allow));
-        }
-    }
+    runtime_control::run(config, args.config, overrides, logging).await
 }
 
 /// Run in SOCKS5 proxy mode (Brook-style)
-async fn run_socks5(config: ClientConfig) -> Result<()> {
+async fn run_socks5(config: ClientConfig, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
     info!("Starting R-VPN Client in SOCKS5 mode (Brook-style)");
     info!("Server: {}", config.server_address);
 
@@ -351,11 +258,12 @@ async fn run_socks5(config: ClientConfig) -> Result<()> {
     let stats_manager = stats::init_global_stats_manager_with_dir(config.data_dir.clone()).await;
     let _stats_handle = stats_manager.start_collection();
 
-    // Optionally start the stats dashboard (SOCKS5 mode: runs until exit)
-    start_dashboard(&config, None).await;
-
     // Create SOCKS5 proxy (each connection manages its own WebSocket)
     let proxy = Socks5Proxy::new(socks_addr, &config).await?;
+    // Bind every listener before reporting readiness, so a failed reload can
+    // restore the previous generation instead of silently losing a proxy.
+    let socks_listener = tokio::net::TcpListener::bind(socks_addr).await
+        .with_context(|| format!("Failed to bind SOCKS5 proxy to {socks_addr}"))?;
 
     // Optionally start DNS proxy (forwards UDP DNS through the tunnel's /dns endpoint)
     if config.dns_proxy.enabled {
@@ -394,8 +302,11 @@ async fn run_socks5(config: ClientConfig) -> Result<()> {
             extra_server_hosts,
         ));
 
+        let socket = tokio::net::UdpSocket::bind(dns_listen).await
+            .with_context(|| format!("Failed to bind DNS proxy to {dns_listen}"))?;
+
         tokio::spawn(async move {
-            if let Err(e) = dns_proxy.run().await {
+            if let Err(e) = dns_proxy.run_with_socket(socket).await {
                 error!("DNS proxy fatal error: {}", e);
             }
         });
@@ -424,25 +335,22 @@ async fn run_socks5(config: ClientConfig) -> Result<()> {
         )
         .await?;
 
+        let listener = tokio::net::TcpListener::bind(http_listen).await
+            .with_context(|| format!("Failed to bind HTTP proxy to {http_listen}"))?;
+
         tokio::spawn(async move {
-            if let Err(e) = http_proxy.run().await {
+            if let Err(e) = http_proxy.run_with_listener(listener).await {
                 error!("HTTP proxy fatal error: {}", e);
             }
         });
     }
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(handle_signals(shutdown_tx));
-    tokio::select! {
-        result = proxy.run() => result?,
-        _ = shutdown_rx.changed() => {},
-    }
-
-    Ok(())
+    let _ = ready.send(());
+    proxy.run_with_listener(socks_listener).await
 }
 
 /// Run in TUN mode (full VPN)
-async fn run_tun(config: ClientConfig) -> Result<()> {
+async fn run_tun(config: ClientConfig, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
     use tun::TunDevice;
     use tunnel::VpnTunnel;
 
@@ -489,16 +397,10 @@ async fn run_tun(config: ClientConfig) -> Result<()> {
     // 1.3 ticket instead of paying a full handshake.
     let resumption_store = rvpn_tls::ResumptionStore::new();
 
-    // Set up signal handling for graceful shutdown
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    // Spawn signal handler task
-    tokio::spawn(async move {
-        handle_signals(shutdown_tx).await;
-    });
-
-    // Optionally start the stats dashboard (exits with the shutdown signal)
-    start_dashboard(&config, Some(shutdown_rx.clone())).await;
+    // The generation runtime owns cancellation, including a pending connect or
+    // retry sleep. No per-generation process signal handlers are installed.
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _ = ready.send(());
 
     // Main reconnection loop
     loop {

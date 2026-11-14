@@ -37,7 +37,7 @@ const WS_CHANNEL_CAPACITY: usize = 256;
 
 /// Optional DoH resolver for VPN endpoint DNS, shared across reconnects.
 #[cfg(not(target_os = "android"))]
-static ENDPOINT_DNS: std::sync::OnceLock<crate::dns_cache::DnsResolver> = std::sync::OnceLock::new();
+static ENDPOINT_DNS: std::sync::RwLock<Option<std::sync::Arc<crate::dns_cache::DnsResolver>>> = std::sync::RwLock::new(None);
 
 #[cfg(not(target_os = "android"))]
 pub fn configure_endpoint_dns(client_config: &crate::config::ClientConfig) -> Result<()> {
@@ -47,7 +47,7 @@ pub fn configure_endpoint_dns(client_config: &crate::config::ClientConfig) -> Re
     } else {
         &config.dns_servers
     };
-    if nameservers.iter().any(|ns| ns.contains("://")) {
+    let resolver = if nameservers.iter().any(|ns| ns.contains("://")) {
         let resolver = crate::dns_cache::DnsResolver::new(
             config.dns_cache_enabled,
             config.dns_cache_ttl,
@@ -56,9 +56,9 @@ pub fn configure_endpoint_dns(client_config: &crate::config::ClientConfig) -> Re
             config.prefer_ipv4,
             vec![],
         ).with_nameservers(nameservers)?;
-        ENDPOINT_DNS.set(resolver)
-            .map_err(|_| anyhow::anyhow!("Endpoint DNS already configured"))?;
-    }
+        Some(std::sync::Arc::new(resolver))
+    } else { None };
+    *ENDPOINT_DNS.write().unwrap_or_else(|e| e.into_inner()) = resolver;
     Ok(())
 }
 
@@ -66,7 +66,8 @@ pub fn configure_endpoint_dns(client_config: &crate::config::ClientConfig) -> Re
 /// hostname lookup by the OS after a split-tunnel decision.
 #[cfg(not(target_os = "android"))]
 pub async fn connect_direct_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream> {
-    if let Some(resolver) = ENDPOINT_DNS.get() {
+    let resolver = ENDPOINT_DNS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(resolver) = resolver {
         let addresses = resolver.resolve(host, port).await?;
         Ok(tokio::net::TcpStream::connect(addresses.as_slice()).await?)
     } else {
@@ -169,7 +170,8 @@ pub async fn connect_websocket(
     resumption: Option<&ResumptionStore>,
 ) -> Result<WebSocketStream<ChromeTlsStream>> {
     // Establish TLS connection with Chrome fingerprint via boring
-    let tls_stream = if let Some(resolver) = ENDPOINT_DNS.get() {
+    let resolver = ENDPOINT_DNS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let tls_stream = if let Some(resolver) = resolver {
         let addresses = resolver.resolve(host, port).await?;
         let mut connected = None;
         let mut last_error = None;

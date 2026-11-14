@@ -27,3 +27,10 @@ enabled   = false
 domains   = ["example.com"]
 contacts  = ["mailto:ops@example.com"]
 cache_dir = "/var/lib/rvpn/acme"
+
+# 文件日志默认写在 rvpn-server 可执行文件旁，按 UTC 日期分文件。
+[server.logging]
+file_enabled = true
+level = "info"                 # off/error/warn/info/debug/trace；-v/-vv 可覆盖
+max_files = 7                  # 最多保留 7 份日志
+# directory = "./logs"         # 可选：相对于配置文件目录，支持绝对路径

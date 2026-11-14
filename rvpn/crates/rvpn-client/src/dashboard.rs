@@ -8,7 +8,10 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Embedded MRTG/RRD-style stats dashboard (client-only, opt-in).
+//! Dashboard statistics and legacy standalone renderer (client-only, opt-in).
+//!
+//! The CLI now serves its embedded React/WebSocket UI through `control_panel`.
+//! This module retains counters, sampling and the standalone library renderer.
 //!
 //! When `[dashboard] enabled = true` (or `--dashboard-listen` is given), the
 //! client keeps an in-memory 5-second-resolution time series (24 h ring) plus
@@ -414,7 +417,7 @@ impl Drop for HandshakeProbe {
 
 /// Current unix time in seconds (0 on clock-before-epoch, which never
 /// happens on a real system).
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -436,6 +439,7 @@ pub async fn run_sampler(state: Arc<DashboardState>) {
 }
 
 /// Sampler variant that exits cleanly when `shutdown` flips to true.
+#[allow(dead_code)] // Standalone library users can still use a shutdown token.
 pub async fn run_sampler_until(
     state: Arc<DashboardState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -457,6 +461,7 @@ pub async fn run_sampler_until(
 
 /// HTTP accept loop: serves the dashboard until the runtime shuts down.
 /// Connections from outside `allow` get a bare 403.
+#[allow(dead_code)] // Retained library API for users of the standalone statistics renderer.
 pub async fn serve(listener: TcpListener, state: Arc<DashboardState>, allow: Arc<Vec<IpNetwork>>) {
     loop {
         match listener.accept().await {
@@ -475,6 +480,7 @@ pub async fn serve(listener: TcpListener, state: Arc<DashboardState>, allow: Arc
 }
 
 /// HTTP accept loop variant that exits cleanly when `shutdown` flips to true.
+#[allow(dead_code)] // The CLI uses control_panel::serve; external library users may still use this.
 pub async fn serve_until(
     listener: TcpListener,
     state: Arc<DashboardState>,
@@ -593,7 +599,7 @@ async fn write_response(
 
 /// Build the JSON stats payload: current counters, uptime, last 30 min of
 /// 5 s buckets.
-fn render_stats_json(state: &DashboardState, now: u64) -> String {
+pub(crate) fn render_stats_json(state: &DashboardState, now: u64) -> String {
     let uptime = now.saturating_sub(state.started_at.load(Ordering::Relaxed));
     let buckets: Vec<serde_json::Value> = state
         .buckets_since(now.saturating_sub((JSON_BUCKET_COUNT as u64) * SAMPLE_INTERVAL_SECS))

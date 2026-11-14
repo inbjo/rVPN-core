@@ -101,10 +101,16 @@ impl HttpProxy {
         })
     }
 
+    #[allow(dead_code)] // Library entry point; the CLI supplies a bound listener.
     pub async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(self.listen_addr)
             .await
             .with_context(|| format!("Failed to bind HTTP proxy to {}", self.listen_addr))?;
+
+        self.run_with_listener(listener).await
+    }
+
+    pub(crate) async fn run_with_listener(&self, listener: TcpListener) -> Result<()> {
 
         info!("HTTP proxy listening on {}", self.listen_addr);
 

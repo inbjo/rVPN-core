@@ -15,6 +15,9 @@ use crate::tls_fingerprint_stub::TlsFingerprint;
 /// Main client configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
+    /// Console and file logging settings.
+    #[serde(default)]
+    pub logging: rvpn_logging::LoggingConfig,
     /// Server WebSocket address
     #[serde(default = "default_server_address")]
     pub server_address: String,
@@ -102,6 +105,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
+            logging: rvpn_logging::LoggingConfig::default(),
             server_address: "wss://localhost:443/api/v1/ws".to_string(),
             sni_hostname: None,
             identity_key_file: PathBuf::from("identity.key"),
@@ -173,6 +177,7 @@ impl ClientConfig {
         };
         let base = path.parent()
             .context("Configuration path has no parent directory")?;
+        config.logging.resolve_directory(base);
         for file in [
             Some(&mut config.identity_key_file),
             config.prekey_bundle.as_mut(),
@@ -462,15 +467,14 @@ fn default_http_proxy_listen() -> String {
     "127.0.0.1:8118".to_string()
 }
 
-/// Stats dashboard configuration
+/// Embedded control panel configuration
 ///
-/// When enabled, the client serves a self-contained MRTG/RRD-style HTML+SVG
-/// stats page (and a JSON API at `/api/stats.json`) from a small embedded
-/// HTTP listener. There is no authentication; access is restricted by client
-/// IP against `allow_cidrs` (localhost only by default).
+/// Serves an embedded React UI and WebSocket configuration/stats channel.
+/// Allowed peers can read and edit the entire config. Access is restricted by
+/// CIDR plus Host/Origin checks; localhost only by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardConfig {
-    /// Enable the stats dashboard HTTP listener
+    /// Enable the web control panel HTTP/WebSocket listener
     #[serde(default)]
     pub enabled: bool,
 
@@ -791,6 +795,10 @@ tunnel_networks_file = "./rules/tunnel-ips.txt"
 tunnel_domains_file = "./rules/tunnel-domains.txt"
 ad_block_file = "./rules/ads.txt"
 country_ips_file = "./rules/country-ips.json"
+[logging]
+directory = "./logs"
+level = "debug"
+max_files = 3
 "#;
         let input: ClientConfig = toml::from_str(raw).unwrap();
         for ext in ["toml", "json"] {
@@ -799,6 +807,9 @@ country_ips_file = "./rules/country-ips.json"
             std::fs::write(&path, contents).unwrap();
             // No change to the process CWD: files must be found beside config.
             let config = ClientConfig::load(&path).unwrap();
+            assert_eq!(config.logging.directory, Some(directory.join("./logs")));
+            assert_eq!(config.logging.level, "debug");
+            assert_eq!(config.logging.max_files, 3);
             let loaded = rvpn_core::crypto::IdentityKey::load(&config.identity_key_file).unwrap();
             assert_eq!(loaded.verifying_key, identity.verifying_key);
             assert_eq!(std::fs::read_to_string(config.prekey_bundle.unwrap()).unwrap(), "{}");

@@ -463,11 +463,20 @@ impl FlowSendCredits {
     pub fn grant(&self, n: u64) {
         // Saturating: a misbehaving peer granting unbounded credits must not
         // wrap the counter and corrupt accounting.
-        let _ = self
-            .credits
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                Some(c.saturating_add(n))
-            });
+        // Use a CAS loop to support the workspace MSRV without relying on
+        // the renamed atomic update API.
+        let mut current = self.credits.load(Ordering::Acquire);
+        loop {
+            match self.credits.compare_exchange_weak(
+                current,
+                current.saturating_add(n),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         self.notify.notify_one();
     }
 
@@ -752,6 +761,28 @@ mod tests {
         assert_eq!(credits.available(), u64::MAX);
         credits.grant(1);
         assert_eq!(credits.available(), u64::MAX, "grants must not wrap");
+    }
+
+    #[test]
+    fn test_flow_credits_concurrent_grants_are_not_lost() {
+        let credits = FlowSendCredits::new();
+        credits.try_consume(INITIAL_FLOW_WINDOW as u64);
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let credits = &credits;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..1000 {
+                        credits.grant(1);
+                    }
+                });
+            }
+        });
+        assert_eq!(credits.available(), 8000);
+        assert_eq!(credits.try_consume(8000), 8000);
+        assert_eq!(credits.available(), 0);
     }
 
     #[tokio::test]

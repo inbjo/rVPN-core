@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 rvpn-core = { path = "../rvpn-core" }
+rvpn-logging = { path = "../rvpn-logging" }
 rvpn-tls = { path = "../rvpn-tls" }
 rvpn-split-tunnel = { path = "../rvpn-split-tunnel" }
 
@@ -86,6 +87,7 @@ lazy_static.workspace = true
 parking_lot.workspace = true
 async-trait = "0.1"
 dirs = "5.0"
+tempfile.workspace = true
 
 # mimalloc global allocator — glibc malloc arenas retain memory indefinitely
 # under this client's allocation churn (long-running Linux installs grew

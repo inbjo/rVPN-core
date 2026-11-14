@@ -14,6 +14,8 @@ on:
       - rvpn/Cargo.lock
       - rvpn/Cargo.toml
       - rvpn/crates/**
+      - rvpn/webui/**
+      - DESIGN.md
       - config/**
       - scripts/update_rule_data.py
       - scripts/test_update_rule_data.py
@@ -23,6 +25,8 @@ on:
       - rvpn/Cargo.lock
       - rvpn/Cargo.toml
       - rvpn/crates/**
+      - rvpn/webui/**
+      - DESIGN.md
       - config/**
       - scripts/update_rule_data.py
       - scripts/test_update_rule_data.py
@@ -31,6 +35,30 @@ permissions:
   contents: read
 
 jobs:
+  webui:
+    name: Build and test embedded control panel
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rvpn/webui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: rvpn/webui/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v7
+        with:
+          name: control-panel-ui
+          path: rvpn/crates/rvpn-client/ui-dist/index.html
+          if-no-files-found: error
+
   rule_data:
     name: Rule data parser tests
     runs-on: ubuntu-24.04
@@ -39,6 +67,7 @@ jobs:
       - run: python3 -B -m unittest discover -s scripts -p 'test_update_rule_data.py'
 
   windows:
+    needs: webui
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -54,6 +83,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: control-panel-ui
+          path: rvpn/crates/rvpn-client/ui-dist
 
       - name: Show Rust toolchain
         run: |
@@ -78,6 +112,18 @@ jobs:
 
       - name: Test configuration and relative paths
         run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn config::tests --timings
+
+      - name: Test WebSocket control panel
+        run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn control_panel::tests --timings
+
+      - name: Test configuration hot reload and rollback
+        run: cargo test --profile ci-test --locked --package rvpn-client --test hot_reload --timings
+
+      - name: Test shared file logging
+        run: cargo test --profile ci-test --locked --package rvpn-logging --timings
+
+      - name: Test server file logging
+        run: cargo test --profile ci-test --locked --package rvpn-server --test logging --timings
 
       - name: Test server configuration and relative paths
         run: cargo test --profile ci-test --locked --package rvpn-server --lib config::tests --timings
@@ -148,6 +194,7 @@ jobs:
           compression-level: 0
 
   unix:
+    needs: webui
     name: rvpn-${{ matrix.artifact }}
     strategy:
       fail-fast: false
@@ -175,6 +222,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: control-panel-ui
+          path: rvpn/crates/rvpn-client/ui-dist
+
       - name: Show Rust toolchain
         run: |
           rustc --version
@@ -197,6 +249,18 @@ jobs:
 
       - name: Test configuration and relative paths
         run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn config::tests --timings
+
+      - name: Test WebSocket control panel
+        run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn control_panel::tests --timings
+
+      - name: Test configuration hot reload and rollback
+        run: cargo test --profile ci-test --locked --package rvpn-client --test hot_reload --timings
+
+      - name: Test shared file logging
+        run: cargo test --profile ci-test --locked --package rvpn-logging --timings
+
+      - name: Test server file logging
+        run: cargo test --profile ci-test --locked --package rvpn-server --test logging --timings
 
       - name: Test server configuration and relative paths
         run: cargo test --profile ci-test --locked --package rvpn-server --lib config::tests --timings
