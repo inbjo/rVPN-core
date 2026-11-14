@@ -60,14 +60,20 @@ jobs:
           if-no-files-found: error
 
   rule_data:
-    name: Rule data parser tests
+    name: Refresh, validate and package built-in rules
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - run: python3 -B -m unittest discover -s scripts -p 'test_update_rule_data.py'
+      - run: python3 -B scripts/update_rule_data.py --output-dir generated-rules
+      - uses: actions/upload-artifact@v7
+        with:
+          name: routing-rules
+          path: generated-rules/
+          if-no-files-found: error
 
   windows:
-    needs: webui
+    needs: [webui, rule_data]
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -88,6 +94,12 @@ jobs:
         with:
           name: control-panel-ui
           path: rvpn/crates/rvpn-client/ui-dist
+
+      - name: Download rules to embed in the binary
+        uses: actions/download-artifact@v7
+        with:
+          name: routing-rules
+          path: rvpn/crates/rvpn-split-tunnel/data
 
       - name: Show Rust toolchain
         run: |
@@ -121,6 +133,12 @@ jobs:
 
       - name: Test shared file logging
         run: cargo test --profile ci-test --locked --package rvpn-logging --timings
+
+      - name: Test gfwlist imports and domain routing
+        run: cargo test --profile ci-test --locked --package rvpn-split-tunnel --lib --timings
+
+      - name: Test WebSocket close handling
+        run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn websocket::tests --timings
 
       - name: Test server file logging
         run: cargo test --profile ci-test --locked --package rvpn-server --test logging --timings
@@ -194,7 +212,7 @@ jobs:
           compression-level: 0
 
   unix:
-    needs: webui
+    needs: [webui, rule_data]
     name: rvpn-${{ matrix.artifact }}
     strategy:
       fail-fast: false
@@ -227,6 +245,12 @@ jobs:
           name: control-panel-ui
           path: rvpn/crates/rvpn-client/ui-dist
 
+      - name: Download rules to embed in the binary
+        uses: actions/download-artifact@v7
+        with:
+          name: routing-rules
+          path: rvpn/crates/rvpn-split-tunnel/data
+
       - name: Show Rust toolchain
         run: |
           rustc --version
@@ -258,6 +282,12 @@ jobs:
 
       - name: Test shared file logging
         run: cargo test --profile ci-test --locked --package rvpn-logging --timings
+
+      - name: Test gfwlist imports and domain routing
+        run: cargo test --profile ci-test --locked --package rvpn-split-tunnel --lib --timings
+
+      - name: Test WebSocket close handling
+        run: cargo test --profile ci-test --locked --package rvpn-client --bin rvpn websocket::tests --timings
 
       - name: Test server file logging
         run: cargo test --profile ci-test --locked --package rvpn-server --test logging --timings
@@ -353,8 +383,11 @@ jobs:
           pattern: rvpn-*
           path: downloads
 
-      - name: Refresh rule data for client archives
-        run: python3 -B scripts/update_rule_data.py --output-dir generated-rules
+      - name: Download the same rules embedded in the binaries
+        uses: actions/download-artifact@v7
+        with:
+          name: routing-rules
+          path: generated-rules
 
       - name: Package release assets
         shell: bash

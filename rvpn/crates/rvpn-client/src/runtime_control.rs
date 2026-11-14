@@ -165,9 +165,10 @@ fn serve_panel(
     );
     let local = listener.local_addr().ok();
     if let Some(local) = local {
-        tracing::info!("Web 控制面板已启动，请在浏览器中访问：{}", panel_url(local));
+        println!("Web 控制面板已启动，请在浏览器中访问：{}", panel_url(local));
+        tracing::debug!("Control panel listening: {}", panel_url(local));
         if local.ip().is_unspecified() {
-            tracing::info!("控制面板监听所有网卡，其他设备请使用本机 IP 和端口 {} 访问（仍受 allow_cidrs 限制）", local.port());
+            println!("其他设备请使用本机 IP 和端口 {} 访问（受 allow_cidrs 限制）", local.port());
         }
     }
     PanelListener {

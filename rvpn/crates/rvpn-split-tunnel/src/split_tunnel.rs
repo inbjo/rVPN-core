@@ -92,6 +92,7 @@ struct SplitTunnelData {
     tunnel_networks: IpNetworkTable<bool>,
     /// Domains that must go through VPN
     tunnel_domains: HashSet<String>,
+    gfwlist: crate::gfwlist::Rules,
     /// Domains to block (ads, tracking, malware)
     block_domains: HashSet<String>,
     /// Last reload time
@@ -131,6 +132,7 @@ impl Clone for SplitTunnelData {
             country_networks: self.country_networks.clone(),
             tunnel_networks,
             tunnel_domains: self.tunnel_domains.clone(),
+            gfwlist: self.gfwlist.clone(),
             block_domains: self.block_domains.clone(),
             last_reload: self.last_reload,
         }
@@ -146,6 +148,7 @@ impl Default for SplitTunnelData {
             country_networks: HashMap::new(),
             tunnel_networks: IpNetworkTable::new(),
             tunnel_domains: HashSet::new(),
+            gfwlist: crate::gfwlist::Rules::default(),
             block_domains: HashSet::new(),
             last_reload: Instant::now(),
         }
@@ -246,7 +249,7 @@ impl SplitTunnel {
 
         // Check built-in force tunnel domains (Google, Facebook, etc.)
         // These override IP-based bypass decisions
-        if matches_force_tunnel_domain(host) {
+        if data.gfwlist.forces_proxy(host) || matches_force_tunnel_domain(host) {
             debug!("Host {} matches force tunnel domain list", host);
             return RoutingDecision::Tunnel;
         }
@@ -300,6 +303,11 @@ impl SplitTunnel {
             return RoutingDecision::Bypass;
         }
 
+        if data.gfwlist.forces_proxy(host) {
+            debug!("Host {} matches gfwlist proxy domain", host);
+            return RoutingDecision::Tunnel;
+        }
+
         // Release the read guard before the CN branch below. That branch
         // awaits DNS resolution (with retries, up to ~27s); if the guard were
         // held across it, the config auto-reload writer would queue on the
@@ -336,6 +344,26 @@ impl SplitTunnel {
 
         // Default to tunnel if no match
         RoutingDecision::Tunnel
+    }
+
+    /// Check if a domain matches any pattern in the set
+    /// Explicit tunnel decisions must not trigger client-side DNS probes.
+    pub async fn requires_tunnel(&self, host: &str) -> bool {
+        if !self.config.enabled { return true; }
+        let data = self.data.read().await;
+        if Self::matches_domain(host, &data.tunnel_domains) { return true; }
+        if Self::matches_domain(host, &data.bypass_domains) { return false; }
+        data.gfwlist.forces_proxy(host) || matches_force_tunnel_domain(host)
+    }
+
+    /// Proxy traffic: definitive domain rules precede any local IP probe.
+    pub async fn decide_for_connection(&self, host: &str) -> RoutingDecision {
+        let decision = self.decide_by_host(host).await;
+        if decision != RoutingDecision::Tunnel || self.requires_tunnel(host).await { return decision; }
+        match self.resolve_host_to_ips(host).await {
+            Some(ips) => self.decide(host, &ips).await,
+            None => RoutingDecision::Tunnel,
+        }
     }
 
     /// Check if a domain matches any pattern in the set
@@ -448,6 +476,7 @@ impl SplitTunnel {
             last_reload: Instant::now(),
             ..Default::default()
         };
+        data.gfwlist = crate::gfwlist::builtin().clone();
 
         // Load built-in private networks (RFC 1918) as default bypass networks
         // These are always loaded for security and to enable local network access
@@ -648,13 +677,15 @@ impl SplitTunnel {
         #[cfg(not(feature = "builtin-domains"))]
         let builtin_domain_count = 0;
         info!(
-            "Split tunnel rules loaded: {} bypass networks, {} bypass domains ({} built-in CN), {} tunnel networks, {} tunnel domains, {} block domains",
+            "Split tunnel rules loaded: {} bypass networks, {} bypass domains ({} built-in CN), {} tunnel networks, {} tunnel domains, {} block domains, {} gfwlist proxy domains ({} exceptions)",
             bypass_nets,
             data.bypass_domains.len(),
             builtin_domain_count,
             tunnel_nets,
             data.tunnel_domains.len(),
-            data.block_domains.len()
+            data.block_domains.len(),
+            data.gfwlist.proxy.len(),
+            data.gfwlist.exceptions.len()
         );
 
         Ok(data)
@@ -784,6 +815,7 @@ async fn auto_reload_task(
     interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await; // Initial rules were already loaded by new().
 
     loop {
         ticker.tick().await;
@@ -807,6 +839,46 @@ async fn auto_reload_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "builtin-domains")]
+    #[tokio::test]
+    async fn builtin_gfwlist_works_with_existing_config_and_no_external_files() {
+        let config:SplitTunnelConfig=toml::from_str("enabled = true\nauto_reload_interval = 0\n").unwrap();
+        let fields=serde_json::to_value(&config).unwrap();
+        assert!(!fields.as_object().unwrap().keys().any(|key|key.to_lowercase().contains("gfwlist")));
+        let blackhole=tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let resolver=Arc::new(DnsResolver::new(true,300,1000,false,true,vec![])
+            .with_nameservers(&[blackhole.local_addr().unwrap().to_string()]).unwrap());
+        let split=SplitTunnel::new(config,resolver).await.unwrap();
+        // Pick a domain supplied exclusively by GFWList, not the older short
+        // force-tunnel list, so this cannot pass just because Google is built in.
+        let domain=crate::gfwlist::builtin().proxy.iter().find(|domain| {
+            !matches_force_tunnel_domain(domain) && !matches_china_domain(domain)
+                && !matches_ad_domain(domain) && crate::gfwlist::builtin().forces_proxy(domain)
+        }).unwrap();
+        assert_eq!(tokio::time::timeout(Duration::from_millis(100),split.decide_for_connection(domain)).await.unwrap(),RoutingDecision::Tunnel);
+    }
+    #[tokio::test]
+    async fn gfwlist_overrides_cn_ips_without_local_dns_and_respects_user_rules() {
+        let config = SplitTunnelConfig { enabled:true, auto_reload_interval:0, ..Default::default() };
+        // A nonresponsive resolver would make an accidental DNS probe stall.
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let resolver = Arc::new(DnsResolver::new(true,300,1000,false,true,vec![])
+            .with_nameservers(&[blackhole.local_addr().unwrap().to_string()]).unwrap());
+        let split = SplitTunnel::new(config,resolver).await.unwrap();
+        split.data.write().await.gfwlist = crate::gfwlist::Rules {
+            proxy: HashSet::from(["proxy.example".into()]),
+            exceptions: HashSet::from(["except.proxy.example".into()]), skipped:0,
+        };
+        let routed = tokio::time::timeout(Duration::from_millis(100),split.decide_for_connection("www.proxy.example")).await.unwrap();
+        assert_eq!(routed,RoutingDecision::Tunnel);
+        assert!(split.requires_tunnel("www.proxy.example").await);
+        assert!(!split.requires_tunnel("except.proxy.example").await);
+        assert_eq!(split.decide("www.proxy.example",&["127.0.0.1".parse().unwrap()]).await,RoutingDecision::Tunnel);
+        split.data.write().await.bypass_domains.insert("proxy.example".into());
+        assert_eq!(split.decide_by_host("www.proxy.example").await,RoutingDecision::Bypass);
+        split.data.write().await.tunnel_domains.insert("proxy.example".into());
+        assert_eq!(split.decide_by_host("www.proxy.example").await,RoutingDecision::Tunnel);
+    }
     use std::net::Ipv4Addr;
 
     #[test]

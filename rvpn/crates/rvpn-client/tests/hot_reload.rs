@@ -82,6 +82,13 @@ async fn save(socket: &mut Socket, current: &mut Value, config: Value) -> Value 
 }
 
 fn fixture(missing_bundle: bool) -> (tempfile::TempDir, Process, SocketAddr, SocketAddr) {
+    fixture_logging(missing_bundle, false)
+}
+
+fn fixture_logging(
+    missing_bundle: bool,
+    file_logging: bool,
+) -> (tempfile::TempDir, Process, SocketAddr, SocketAddr) {
     let directory = tempfile::tempdir().unwrap();
     let binary = directory.path().join(
         std::path::Path::new(env!("CARGO_BIN_EXE_rvpn"))
@@ -115,18 +122,62 @@ fn fixture(missing_bundle: bool) -> (tempfile::TempDir, Process, SocketAddr, Soc
     config.socks5.listen_address = socks.to_string();
     config.dns_proxy.enabled = false;
     config.http_proxy.enabled = false;
-    config.logging.file_enabled = false;
+    config.logging.file_enabled = file_logging;
+    if file_logging {
+        config.logging.level = "trace".into();
+    }
     let path = directory.path().join("client.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
     let child = Process(
         Command::new(binary)
             .args(["-c", path.to_str().unwrap()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     );
     (directory, child, panel, socks)
+}
+
+#[tokio::test]
+async fn file_logging_keeps_only_panel_access_information_on_console() {
+    let (directory, mut child, panel, socks) = fixture_logging(false, true);
+    let (mut socket, mut current) = connect(panel).await;
+    // Trigger a successful save to prove runtime messages aren't duplicated.
+    let mut config = current["config"].clone();
+    config["logging"]["max_files"] = json!(3);
+    assert_eq!(save(&mut socket, &mut current, config).await["ok"], true);
+    assert!(TcpStream::connect(socks).await.is_ok());
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    use std::io::Read;
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains(&format!("http://{panel}/")), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
+    let logs: String = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect();
+    assert!(logs.contains("Client configuration applied"));
+    assert!(!logs.contains('\u{1b}'));
 }
 
 async fn idle_flow(address: SocketAddr) -> TcpStream {

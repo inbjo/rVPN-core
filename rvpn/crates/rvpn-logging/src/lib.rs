@@ -60,6 +60,8 @@ where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     tracing_subscriber::fmt::layer()
+        // Shared span formatting must never inject terminal escapes into files.
+        .with_ansi(false)
         .with_target(false)
         .with_thread_ids(false)
         .with_file(true)
@@ -165,7 +167,15 @@ fn prepare_logging(config: &LoggingConfig, verbose: u8, prefix: &str) -> Result<
     let filter = config.level(verbose)?;
     // Use a subscriber-wide LevelFilter layer. Replacing `Filtered` would
     // require a new registry FilterId, which reload::Handle cannot register.
-    let mut layers: Vec<DynamicLayer> = vec![filter.boxed(), console_layer().boxed()];
+    let dependency_filter = tracing_subscriber::filter::filter_fn(|metadata| {
+        metadata.target().starts_with("rvpn_") || *metadata.level() <= Level::WARN
+    });
+    let mut layers: Vec<DynamicLayer> = vec![filter.boxed(), dependency_filter.boxed()];
+    // Client file logging replaces console output; the browser URL is printed
+    // separately even when logs are disabled or the level is set to off.
+    if !config.file_enabled {
+        layers.push(console_layer().boxed());
+    }
     let mut guard = None;
     if config.file_enabled {
         let executable = std::env::current_exe()?;
@@ -287,6 +297,11 @@ mod tests {
                 .apply(controller.prepare(&config).unwrap())
                 .unwrap();
             tracing::debug!("after live reload");
+            tracing::debug!(target: "h2", "noisy dependency details");
+            tracing::warn!(target: "h2", "important dependency warning");
+            let span = tracing::info_span!("test_span", peer = "client");
+            let _entered = span.enter();
+            info!("span message without terminal codes");
             let occupied = directory.path().join("occupied");
             std::fs::write(&occupied, "not a directory").unwrap();
             config.directory = Some(occupied);
@@ -300,6 +315,9 @@ mod tests {
         assert!(!first.contains("after live reload"));
         assert!(second.contains("after live reload"));
         assert!(second.contains("old logger still works"));
+        assert!(!second.contains("noisy dependency details"));
+        assert!(second.contains("important dependency warning"));
+        assert!(!second.contains('\u{1b}'));
     }
 
     #[test]

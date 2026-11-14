@@ -252,26 +252,41 @@ where
     let (tx_to_ws, mut rx_from_app) = tokio::sync::mpsc::channel::<Message>(WS_CHANNEL_CAPACITY);
     let (tx_to_app, rx_to_app) = tokio::sync::mpsc::channel::<Message>(WS_CHANNEL_CAPACITY);
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
+    let closing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Writer task
     let writer_join = {
+        let closing = closing.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     msg = rx_from_app.recv() => match msg {
                         Some(msg) => {
-                            if let Err(e) = write.send(msg).await {
-                                tracing::error!("WebSocket send error: {}", e);
+                            if closing.load(std::sync::atomic::Ordering::Acquire) {
+                                // Receiving Close queues tungstenite's automatic
+                                // acknowledgement. Flush it, never send new data.
+                                let _ = write.flush().await;
                                 break;
                             }
+                            let is_close = matches!(msg, Message::Close(_));
+                            if is_close { closing.store(true, std::sync::atomic::Ordering::Release); }
+                            if let Err(e) = write.send(msg).await {
+                                match e {
+                                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed
+                                    | tungstenite::Error::Protocol(tungstenite::error::ProtocolError::SendAfterClosing) => tracing::debug!("WebSocket already closing"),
+                                    other => tracing::error!("WebSocket send error: {}", other),
+                                }
+                                break;
+                            }
+                            if is_close { break; }
                         }
                         None => break,
                     },
                     _ = shutdown_rx.recv() => break,
                 }
             }
-            tracing::info!("WebSocket writer task ending");
+            tracing::debug!("WebSocket writer task ending");
         })
     };
 
@@ -279,6 +294,7 @@ where
     // Uses jittered intervals to avoid perfectly periodic traffic patterns
     // that statistical classifiers can detect.
     let ping_join = {
+        let closing = closing.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let ping_sender = tx_to_ws.clone();
         tokio::spawn(async move {
@@ -287,16 +303,17 @@ where
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(rng.gen_range(5000..=8000))) => {}
                 _ = shutdown_rx.recv() => {
-                    tracing::info!("WebSocket ping task ending");
+                    tracing::debug!("WebSocket ping task ending");
                     return;
                 }
             }
             loop {
+                if closing.load(std::sync::atomic::Ordering::Acquire) { break; }
                 // try_send on the bounded channel: a Full channel means the
                 // writer is backpressured by TCP — skip this ping (the next
                 // one in ~11s will get through) rather than block or break.
                 match ping_sender.try_send(Message::Ping(vec![])) {
-                    Ok(()) => trace!("WebSocket ping sent"),
+                    Ok(()) => {},
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                         trace!("WebSocket channel full, skipping ping");
                     }
@@ -312,28 +329,37 @@ where
                     _ = shutdown_rx.recv() => break,
                 }
             }
-            tracing::info!("WebSocket ping task ending");
+            tracing::debug!("WebSocket ping task ending");
         })
     };
 
     // Reader task - note: mpsc channel drops tx_to_app when task exits
     let reader_join = {
+        let closing = closing.clone();
+        let close_writer = tx_to_ws.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     result = read.next() => match result {
                         Some(Ok(msg)) => {
-                            if let Message::Pong(_) = &msg {
-                                trace!("WebSocket pong received");
+                            let is_close = matches!(msg, Message::Close(_));
+                            if is_close {
+                                closing.store(true, std::sync::atomic::Ordering::Release);
+                                // Wake the writer to flush the automatic Close response.
+                                let _ = close_writer.try_send(Message::Close(None));
                             }
                             if tx_to_app.send(msg).await.is_err() {
                                 tracing::debug!("WebSocket reader: channel receiver dropped, exiting");
                                 break;
                             }
+                            if is_close { break; }
                         }
                         Some(Err(e)) => {
-                            tracing::error!("WebSocket receive error: {:?}, closing connection", e);
+                            match e {
+                                tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => tracing::debug!("WebSocket closed"),
+                                other => tracing::error!("WebSocket receive error: {:?}, closing connection", other),
+                            }
                             // Don't send anything - just let the task exit which drops the sender
                             break;
                         }
@@ -342,7 +368,7 @@ where
                     _ = shutdown_rx.recv() => break,
                 }
             }
-            tracing::info!("WebSocket reader task ending");
+            tracing::debug!("WebSocket reader task ending");
         })
     };
 
@@ -352,4 +378,40 @@ where
         joins: vec![reader_join, writer_join, ping_join],
     };
     (rx_to_app, writer, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn peer_close_prevents_additional_data_and_completes_close_handshake() {
+        let (client, server) = tokio::io::duplex(4096);
+        let client = WebSocketStream::from_raw_socket(client,tungstenite::protocol::Role::Client,None).await;
+        let mut server = WebSocketStream::from_raw_socket(server,tungstenite::protocol::Role::Server,None).await;
+        let (mut reader, writer, tasks) = split_websocket(client);
+        server.send(Message::Close(None)).await.unwrap();
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(1),reader.recv()).await.unwrap(),Some(Message::Close(_))));
+        // Late application data and duplicate Close must never hit the wire.
+        let _ = writer.send(Message::Binary(vec![1,2,3])).await;
+        let _ = writer.send(Message::Close(None)).await;
+        let reply = tokio::time::timeout(Duration::from_secs(1),server.next()).await.unwrap().unwrap().unwrap();
+        assert!(matches!(reply,Message::Close(_)));
+        tokio::time::timeout(Duration::from_secs(1),tasks.shutdown()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_close_stops_writer_and_ping_before_duplicate_close() {
+        let (client, server) = tokio::io::duplex(4096);
+        let client = WebSocketStream::from_raw_socket(client,tungstenite::protocol::Role::Client,None).await;
+        let mut server = WebSocketStream::from_raw_socket(server,tungstenite::protocol::Role::Server,None).await;
+        let (_reader, writer, tasks) = split_websocket(client);
+        writer.send(Message::Close(None)).await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1),server.next()).await.unwrap().unwrap().unwrap();
+        assert!(matches!(reply,Message::Close(_)));
+        assert!(writer.is_closed());
+        assert!(writer.send(Message::Ping(vec![])).await.is_err());
+        tokio::time::timeout(Duration::from_secs(1),tasks.shutdown()).await.unwrap();
+    }
 }

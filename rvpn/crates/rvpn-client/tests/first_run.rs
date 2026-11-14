@@ -87,7 +87,18 @@ fn client_honors_configured_log_directory_and_disable_switch() {
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Client terminated:"));
+        if enabled {
+            assert!(
+                output.stdout.is_empty(),
+                "File logging must not duplicate runtime messages on stdout"
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "File logging must not duplicate errors on stderr"
+            );
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Client terminated:"));
+        }
         let log_dir = config_dir.join("logs");
         if enabled {
             let logs: String = std::fs::read_dir(&log_dir)
@@ -127,11 +138,14 @@ fn client_creates_identity_but_never_invents_server_bundle() {
             !output.status.success(),
             "Missing server bundle should stop startup"
         );
-        let logs = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        let logs: String = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect();
         assert!(logs.contains("client cannot generate it"), "{logs}");
         assert!(logs.contains("Client public identity (Ed25519, base64)"));
         assert!(logs.contains("Client identity fingerprint: ik:1:"));

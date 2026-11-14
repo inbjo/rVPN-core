@@ -1,4 +1,6 @@
 import tempfile
+import base64
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +9,38 @@ import update_rule_data as rules
 
 
 class RuleDataTests(unittest.TestCase):
+    def test_gfwlist_base64_plaintext_and_exceptions(self):
+        source = "[AutoProxy 0.2.9]\n||Example.COM\n.plain.org\n@@||safe.example.com\n|https://path.example/foo\n/regex/\n||wild*.example.com\n"
+        expected = {"proxy": ["example.com", "plain.org"], "exceptions": ["safe.example.com"], "skipped": 3}
+        self.assertEqual(rules.parse_gfwlist(source), expected)
+        self.assertEqual(rules.parse_gfwlist(base64.b64encode(source.encode()).decode()), expected)
+        for invalid in ["", "<html>error</html>", "! empty\n/regex/"]:
+            with self.assertRaises(ValueError):
+                rules.parse_gfwlist(invalid)
+
+    def test_gfwlist_export_does_not_expand_child_exceptions(self):
+        source = "! fixture\n" + "\n".join(f"||site{i}.example" for i in range(1100))
+        source += "\n@@||safe.site1.example\n||child.safe.site1.example\n"
+        files = rules.gfwlist_files(source.encode())
+        parsed = json.loads(files["gfwlist-rules.json"])
+        self.assertIn("site1.example", parsed["proxy"])
+        self.assertIn("safe.site1.example", parsed["exceptions"])
+        exported = set(files["gfwlist-domains.txt"].splitlines())
+        self.assertNotIn("site1.example", exported)
+        self.assertNotIn("child.safe.site1.example", exported)
+        self.assertIn("site2.example", exported)
+        self.assertIn("sha256", json.loads(files["gfwlist-source.json"]))
+
+    def test_gfwlist_embedded_snapshot_matches_its_distributed_source(self):
+        directory = Path(__file__).resolve().parents[1] / "rvpn/crates/rvpn-split-tunnel/data"
+        raw = (directory / "gfwlist.txt").read_bytes()
+        parsed = rules.parse_gfwlist(raw.decode("utf-8"))
+        self.assertEqual(parsed, json.loads((directory / "gfwlist-rules.json").read_text()))
+        source = json.loads((directory / "gfwlist-source.json").read_text())
+        self.assertEqual(source["sha256"], rules.hashlib.sha256(raw).hexdigest())
+        self.assertEqual(source["counts"]["proxy"], len(parsed["proxy"]))
+        self.assertTrue((directory / "LICENSE-GFWList.txt").is_file())
+
     def test_adguard_domain_rules_skip_url_rules_and_exceptions(self):
         source = "\n".join([
             "! header",
@@ -48,6 +82,26 @@ class RuleDataTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     rules.update(output)
             self.assertEqual(previous.read_text(), "old.example\n")
+
+    def test_rule_bundle_includes_gfwlist_source_transforms_license_and_metadata(self):
+        gfw = "! fixture\n" + "\n".join(f"||site{i}.example" for i in range(1100))
+        def fetch(url):
+            return gfw.encode() if url == rules.SOURCES["gfwlist"] else b"fixture"
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(rules, "fetch", side_effect=fetch), \
+             patch.object(rules, "parse_adguard_dns", return_value={f"ad{i}.example" for i in range(50001)}), \
+             patch.object(rules, "parse_adaway_hosts", return_value=set()), \
+             patch.object(rules, "parse_china_domains", return_value={f"site{i}.cn" for i in range(50001)}), \
+             patch.object(rules, "parse_apnic", return_value={"CN": ["1.0.0.0/24"] * 1001}):
+            output = Path(tmp)
+            counts = rules.update(output)
+            self.assertEqual(counts["gfwlist_proxy"], 1100)
+            for name in ["gfwlist.txt", "gfwlist-rules.json", "gfwlist-domains.txt", "gfwlist-source.json", "LICENSE-GFWList.txt"]:
+                self.assertTrue((output / name).is_file(), name)
+            manifest = json.loads((output / "sources.json").read_text())
+            self.assertEqual(manifest["sources"]["gfwlist"]["url"], rules.SOURCES["gfwlist"])
+            self.assertIn("LICENSE-GFWList.txt", manifest["licenses"])
+            self.assertIn("LGPL-2.1", (output / "NOTICE.txt").read_text())
 
 
 if __name__ == "__main__":

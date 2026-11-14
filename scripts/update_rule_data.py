@@ -2,6 +2,7 @@
 """Refresh rVPN's file-backed routing rules from their published sources."""
 
 import argparse
+import base64
 import hashlib
 import ipaddress
 import json
@@ -20,11 +21,13 @@ SOURCES = {
     "adaway": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt",
     "china_domains": "https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf",
     "apnic": "https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest",
+    "gfwlist": "https://raw.githubusercontent.com/gfwlist/gfwlist/refs/heads/master/gfwlist.txt",
 }
 LICENSE_SOURCES = {
     "LICENSE-HostlistsRegistry.txt": "https://raw.githubusercontent.com/AdguardTeam/HostlistsRegistry/main/LICENSE",
     "LICENSE-AdAway.txt": "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/LICENSE.md",
     "LICENSE-dnsmasq-china-list.txt": "https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/LICENSE",
+    "LICENSE-GFWList.txt": "https://raw.githubusercontent.com/gfwlist/gfwlist/master/COPYING.txt",
 }
 COUNTRIES = ("CN", "HK", "SG", "JP", "KR", "TW")
 DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -175,6 +178,64 @@ def parse_apnic(text: str) -> dict[str, list[str]]:
     }
 
 
+def parse_gfwlist(text: str) -> dict:
+    text = text.lstrip("\ufeff").strip()
+    if not (text.startswith(("[AutoProxy", "!", "#")) or "||" in text or "." in text):
+        compact = "".join(text.split())
+        text = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True).decode("utf-8")
+    proxy, exceptions, skipped = set(), set(), 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("!", "#", "[")):
+            continue
+        exception = line.startswith("@@")
+        if exception:
+            line = line[2:]
+        if line.startswith("||"):
+            line = line[2:]
+        if line.startswith("."):
+            line = line[1:]
+        if line.endswith("^"):
+            line = line[:-1]
+        line = line.rstrip(".").lower()
+        try:
+            ipaddress.ip_address(line)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+        if valid_domain(line) and not is_ip:
+            (exceptions if exception else proxy).add(line)
+        else:
+            skipped += 1
+    if not proxy:
+        raise ValueError("GFWList contains no supported proxy domains")
+    return {"proxy": sorted(proxy), "exceptions": sorted(exceptions), "skipped": skipped}
+
+
+def gfwlist_files(raw: bytes) -> dict[str, str]:
+    rules = parse_gfwlist(raw.decode("utf-8"))
+    if len(rules["proxy"]) < 1000:
+        raise ValueError("GFWList did not pass minimum-count validation")
+    # Plain exports cannot represent child exceptions. Omit overlapping roots
+    # there, while the engine's normalized JSON retains both sets exactly.
+    exceptions = set(rules["exceptions"])
+    parents = {".".join(domain.split(".")[i:]) for domain in exceptions for i in range(len(domain.split(".")))}
+    domains = [domain for domain in rules["proxy"] if domain not in parents and
+               not any(".".join(domain.split(".")[i:]) in exceptions for i in range(len(domain.split("."))))]
+    source = {
+        "url": SOURCES["gfwlist"], "sha256": hashlib.sha256(raw).hexdigest(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "license": LICENSE_SOURCES["LICENSE-GFWList.txt"],
+        "counts": {"proxy": len(rules["proxy"]), "exceptions": len(exceptions), "skipped": rules["skipped"]},
+    }
+    return {
+        "gfwlist.txt": raw.decode("utf-8"),
+        "gfwlist-rules.json": json.dumps(rules, separators=(",", ":")) + "\n",
+        "gfwlist-domains.txt": "# GFWList domain subset; overlapping exceptions omitted\n" + "\n".join(domains) + "\n",
+        "gfwlist-source.json": json.dumps(source, indent=2, sort_keys=True) + "\n",
+    }
+
+
 def update(output_dir: Path) -> dict[str, int]:
     raw = {name: fetch(url) for name, url in SOURCES.items()}
     licenses = {name: fetch(url) for name, url in LICENSE_SOURCES.items()}
@@ -183,6 +244,8 @@ def update(output_dir: Path) -> dict[str, int]:
     ad_domains.update(parse_adaway_hosts(decoded["adaway"]))
     china_domains = parse_china_domains(decoded["china_domains"])
     country_ips = parse_apnic(decoded["apnic"])
+    gfw_files = gfwlist_files(raw["gfwlist"])
+    gfw_counts = json.loads(gfw_files["gfwlist-source.json"])["counts"]
 
     # An upstream format change or a partial response must never replace good
     # rules with a nearly empty list.
@@ -202,6 +265,7 @@ def update(output_dir: Path) -> dict[str, int]:
         "counts": {
             "ad_domains": len(ad_domains),
             "china_domains": len(china_domains),
+            **{f"gfwlist_{key}": value for key, value in gfw_counts.items()},
             **{f"{country}_networks": len(networks) for country, networks in country_ips.items()},
         },
     }
@@ -215,15 +279,19 @@ def update(output_dir: Path) -> dict[str, int]:
             "are recorded in sources.json. AdGuard and AdAway license texts are included "
             "under their own filenames. The dnsmasq-china-list license is also included. "
             "APNIC's delegation file states that its country fields record original "
-            "allocation/assignment, not authoritative current IP location.\n"
+            "allocation/assignment, not authoritative current IP location. "
+            "GFWList is distributed under LGPL-2.1 (LICENSE-GFWList.txt); the raw "
+            "source and transformed domain rules are included. URL/path, regex and "
+            "wildcard rules are skipped, and domain exceptions are preserved.\n"
         ),
     }
     files.update({name: data.decode("utf-8") for name, data in licenses.items()})
+    files.update(gfw_files)
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".rvpn-rules-", dir=output_dir) as stage:
         staged = Path(stage)
         for name, content in files.items():
-            (staged / name).write_text(content, encoding="utf-8")
+            (staged / name).write_text(content, encoding="utf-8", newline="\n")
         for name in files:
             os.replace(staged / name, output_dir / name)
     return metadata["counts"]

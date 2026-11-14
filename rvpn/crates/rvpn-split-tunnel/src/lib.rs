@@ -7,6 +7,7 @@ pub mod split_tunnel;
 pub mod config;
 pub mod dns_cache;
 pub mod router;
+pub mod gfwlist;
 
 pub use router::{Router, RoutingRule, DEFAULT_SERVER_NAME};
 

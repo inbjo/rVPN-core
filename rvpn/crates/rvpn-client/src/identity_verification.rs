@@ -218,7 +218,7 @@ pub fn verify_server_identity(
             );
         }
 
-        info!(
+        tracing::debug!(
             "Server identity verified against configured fingerprint: {}",
             format_fingerprint(&canonical_actual)
         );
@@ -274,7 +274,7 @@ pub fn verify_server_identity(
             known_hosts.update_verified(server_address);
         }
 
-        info!(
+        tracing::debug!(
             "Server identity verified: {}",
             format_fingerprint(&canonical_actual)
         );

@@ -63,7 +63,7 @@ impl StreamRelay {
         server_identity_config: Option<&ServerIdentityConfig>,
         resumption: Option<&ResumptionStore>,
     ) -> Result<(Self, WebSocketReader, WebSocketWriter, crate::websocket::WebSocketTaskHandle)> {
-        info!("Connecting StreamRelay to {}:{}{}", host, port, path);
+        debug!("Connecting StreamRelay to {}:{}{}", host, port, path);
 
         // Times the handshake; records handshake_fail on any early error
         // return, handshake_ok on success (dashboard no-ops when disabled).
@@ -93,7 +93,7 @@ impl StreamRelay {
         )
         .await?;
 
-        info!("StreamRelay X3DH handshake completed successfully");
+        debug!("StreamRelay X3DH handshake completed successfully");
         probe.success();
 
         let relay = Self { ratchet };
@@ -248,7 +248,7 @@ impl StreamRelay {
 
                             match result {
                                 VerificationResult::Verified => {
-                                    info!("Server identity verified");
+                                    debug!("Server identity verified");
                                 }
                                 VerificationResult::New => {
                                     info!("New server identity, accepting (TOFU mode)");
@@ -282,7 +282,7 @@ impl StreamRelay {
                         // The server_ephemeral field is empty - init_alice doesn't use this parameter.
                         let ratchet = DoubleRatchet::init_alice(shared_secret, [0u8; 32]);
 
-                        info!("Double Ratchet initialized as Alice (initiator)");
+                        debug!("Double Ratchet initialized as Alice (initiator)");
 
                         Ok(ratchet)
                     }
@@ -390,7 +390,7 @@ impl StreamRelay {
     ) -> Result<()> {
         let (mut local_read, mut local_write) = local.into_split();
 
-        info!("Starting bidirectional relay");
+        debug!("Starting bidirectional relay");
 
         // Share the ratchet between tasks using Arc<Mutex>
         let ratchet = Arc::new(Mutex::new(self.ratchet));
@@ -457,7 +457,7 @@ impl StreamRelay {
                             return Err(e);
                         }
 
-                        debug!("Relayed {} bytes local->remote", n);
+                        tracing::trace!("Relayed {} bytes local->remote", n);
                     }
                     Err(e) => {
                         warn!("Error reading from local: {}", e);
@@ -521,8 +521,9 @@ impl StreamRelay {
                         debug!("WebSocket read returned None");
                         break;
                     }
+                    Some(Message::Ping(_)) | Some(Message::Pong(_)) => continue,
                     _ => {
-                        debug!("Unexpected WebSocket message type");
+                        tracing::trace!("Ignoring unsupported WebSocket message type");
                         continue;
                     }
                 }
@@ -538,7 +539,7 @@ impl StreamRelay {
                     warn!("Error writing to local: {}", e);
                     return Err(e.into());
                 }
-                debug!("Relayed {} bytes remote->local", data.len());
+                tracing::trace!("Relayed {} bytes remote->local", data.len());
             }
             Ok::<_, anyhow::Error>(())
         };
@@ -580,7 +581,7 @@ impl StreamRelay {
         // Graceful shutdown: give TCP socket time to flush
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        info!("Relay completed");
+        debug!("Relay completed");
         Ok(())
     }
 }

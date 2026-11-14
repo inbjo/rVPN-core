@@ -1,0 +1,11 @@
+{
+  "counts": {
+    "exceptions": 31,
+    "proxy": 4113,
+    "skipped": 290
+  },
+  "license": "https://raw.githubusercontent.com/gfwlist/gfwlist/master/COPYING.txt",
+  "sha256": "98bf4c6d9bf78eb240dff015c1e3f2989f63d5f76237f2127c21a4202aa29929",
+  "updated_at": "2026-11-14T06:30:28.847335+00:00",
+  "url": "https://raw.githubusercontent.com/gfwlist/gfwlist/refs/heads/master/gfwlist.txt"
+}

@@ -167,7 +167,11 @@ fn main() -> Result<()> {
         );
         return service::execute(action, &args.config);
     }
-    tokio::runtime::Runtime::new()?.block_on(async_main(args))
+    let result = tokio::runtime::Runtime::new()?.block_on(async_main(args));
+    // async_main recorded the full error and flushed the log worker. Avoid
+    // Rust's Result termination printing that error a second time on stderr.
+    if result.is_err() { std::process::exit(1); }
+    Ok(())
 }
 
 async fn async_main(args: Args) -> Result<()> {

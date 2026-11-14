@@ -1,0 +1,3 @@
+# Preserve upstream bytes so the packaged GFWList matches its recorded SHA-256.
+/rvpn/crates/rvpn-split-tunnel/data/gfwlist.txt -text
+/rvpn/crates/rvpn-split-tunnel/data/*.json text eol=lf

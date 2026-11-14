@@ -251,8 +251,10 @@ Unix logs are available through `journalctl -u rvpn-client` (Linux) or
 
 ### Client and server file logs
 
-Both CLI programs write to the console and daily log files by default, including
-startup errors. Files are stored beside the executable on Windows, Linux, and
+The client writes runtime messages to daily files by default; its console shows
+only the management-page URL. Disable file logging to print runtime messages to
+the console instead. The server writes to both the console and files.
+Startup errors are included. Files are stored beside the executable on Windows, Linux, and
 macOS, including when running as a service: `rvpn-client.YYYY-MM-DD.log` for the client
 and `rvpn-server.YYYY-MM-DD.log` for the server. Dates use UTC, restarts append,
 and up to seven matching log files are retained. Normal shutdown flushes queued
@@ -274,6 +276,42 @@ Omit `directory` to use the executable directory. An explicit relative directory
 is resolved beside the configuration file, including `./` and `../`; absolute
 directories are supported. Missing directories are created automatically.
 Set `file_enabled = false` to keep console logging only.
+The client's `-v`/`-vv` flags increase verbosity for rVPN modules; dependencies
+such as HTTP/2 libraries remain at WARN/ERROR. Successful per-flow handshakes and
+task completion are DEBUG, packet byte counts are TRACE, and ordinary heartbeat
+frames do not emit a log line. File logs never contain terminal color codes.
+
+### Built-in GFWList rules
+
+GFWList is a built-in proxy-domain source, automatically active when split
+routing is enabled. There are no GFWList-specific configuration fields or WebUI
+switches. Startup does not download a list or depend on external files.
+
+CI downloads and validates the upstream GFWList during the shared rule-data
+build, converts its domain rules, then embeds `gfwlist-rules.json` into all
+platform binaries. The exact same data is included in every client archive's
+`rules/` directory: raw `gfwlist.txt`, normalized `gfwlist-rules.json`, plain
+`gfwlist-domains.txt`, source hashes/counts, and `LICENSE-GFWList.txt`. Publishing
+reuses that artifact instead of fetching a different list after compilation.
+A validated snapshot is tracked for offline/local Cargo builds. Updating the
+program updates the built-in snapshot; `auto_reload_interval` continues to
+reload custom rule files without changing this embedded data.
+
+The build parser supports domain names, `.domain`, `||domain`, `||domain^`, and
+`@@` domain exceptions. Matches include subdomains. URL/path, regex and wildcard
+rules are counted and skipped rather than expanded into entire domains. This is
+a domain import, not a complete AutoProxy URL matcher. Exceptions cancel only
+GFWList matches and return to normal routing, without forcing a direct route.
+Explicit user tunnel/bypass rules retain priority. The plain export omits
+parents overlapping exceptions; the embedded JSON retains both sets.
+
+SOCKS5/HTTP targets matching an explicit proxy domain, the built-in proxy list,
+or GFWList go straight to the tunnel, preserving the hostname for remote DNS.
+They no longer perform a local IP probe first. DNS-proxy A queries use the tunnel
+too; VPN server hostnames retain local bootstrap resolution. The current DNS
+tunnel supports address lookups only: AAAA returns NODATA, and non-address types
+such as TXT/MX/HTTPS still use the configured local upstream. Merely enabling the
+DNS listener does not change the operating system's DNS settings.
 
 ### Client TLS trust
 

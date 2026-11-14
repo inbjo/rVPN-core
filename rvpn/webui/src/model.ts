@@ -221,6 +221,7 @@ export const labels: Record<string, string> = {
   ips: 'IP / CIDR 规则',
 }
 export const hints: Record<string, string> = {
+  file_enabled: '客户端写文件时，控制台仅保留管理页面访问提示。',
   server_address: '支持 ws:// 或 wss://，包含 WebSocket 路径。',
   prekey_bundle: '使用服务端生成的公开 prekey-bundle.json。',
   nameservers: '每行一个 UDP 地址或 DoH HTTPS URL，可混合使用。',

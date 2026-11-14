@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use rvpn_core::crypto::{IdentityKey, X3DHPublicBundle};
 
@@ -120,41 +120,12 @@ pub async fn route_connection(
     crate::dashboard::record_conn_accepted();
     let (target_host, target_port) = parse_target(target_addr)?;
 
-    // Split tunnel decision
-    let decision = proxy.split_tunnel.decide_by_host(&target_host).await;
-
-    let final_decision = match decision {
-        RoutingDecision::Bypass => {
-            debug!("Host {} matched bypass domain list", target_host);
-            RoutingDecision::Bypass
-        }
-        RoutingDecision::Block => {
-            debug!("Host {} matched ad/tracker list - blocking", target_host);
-            RoutingDecision::Block
-        }
-        RoutingDecision::Tunnel => {
-            match proxy.split_tunnel.resolve_host_to_ips(&target_host).await {
-                Some(ips) => {
-                    let ip_decision = proxy.split_tunnel.decide(&target_host, &ips).await;
-                    if ip_decision == RoutingDecision::Bypass {
-                        info!(
-                            "Host {} resolved to bypass IPs, bypassing VPN",
-                            target_host
-                        );
-                    }
-                    ip_decision
-                }
-                None => {
-                    error!("Failed to resolve {}, routing through VPN", target_host);
-                    RoutingDecision::Tunnel
-                }
-            }
-        }
-    };
+    // Definitive domain rules go directly to the tunnel without local DNS.
+    let final_decision = proxy.split_tunnel.decide_for_connection(&target_host).await;
 
     match final_decision {
         RoutingDecision::Bypass => {
-            info!("Bypassing VPN for {}:{}", target_host, target_port);
+            debug!("Bypassing VPN for {}:{}", target_host, target_port);
             crate::dashboard::record_conn_bypassed();
             let result = handle_direct_connection(socket, &target_host, target_port).await;
             crate::dashboard::record_conn_completed();
@@ -173,7 +144,7 @@ pub async fn route_connection(
             result?;
         }
         RoutingDecision::Block => {
-            info!("Blocking ad/tracker: {}:{}", target_host, target_port);
+            debug!("Blocking ad/tracker: {}:{}", target_host, target_port);
             crate::dashboard::record_conn_blocked();
             // Caller should handle sending an error response to the client before
             // calling route_connection, but if we get here the socket is just dropped.
@@ -194,7 +165,7 @@ async fn handle_direct_connection(
         .await
         .with_context(|| format!("Failed to connect to {}", target_addr))?;
 
-    info!("Direct connection established to {}", target_addr);
+    debug!("Direct connection established to {}", target_addr);
 
     let (mut client_read, mut client_write) = socket.split();
     let (mut target_read, mut target_write) = target.split();
